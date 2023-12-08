@@ -7,11 +7,13 @@
 
 #include <assert.h>
 #include <drivers/atmel_rtc.h>
+#include <drivers/gpio.h>
 #include <dt-bindings/gpio/atmel,piobu.h>
-#include <gpio.h>
 #include <io.h>
 #include <kernel/boot.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
+#include <kernel/interrupt.h>
 #include <kernel/pm.h>
 #include <libfdt.h>
 #include <mm/core_memprot.h>
@@ -64,8 +66,8 @@ static struct gpio_chip secumod_chip;
  * gpio_pin:    pin from which value needs to be read
  * Return target GPIO pin level.
  */
-static enum gpio_level gpio_get_value(struct gpio_chip *chip __unused,
-				      unsigned int gpio_pin)
+static enum gpio_level secumod_gpio_get_value(struct gpio_chip *chip __unused,
+					      unsigned int gpio_pin)
 {
 	vaddr_t piobu_addr = 0;
 	uint32_t piobu = 0;
@@ -88,8 +90,8 @@ static enum gpio_level gpio_get_value(struct gpio_chip *chip __unused,
  * gpio_pin:    pin to which value needs to be written
  * value:       Level state for the target pin
  */
-static void gpio_set_value(struct gpio_chip *chip __unused,
-			   unsigned int gpio_pin, enum gpio_level value)
+static void secumod_gpio_set_value(struct gpio_chip *chip __unused,
+				   unsigned int gpio_pin, enum gpio_level value)
 {
 	vaddr_t piobu_addr = 0;
 
@@ -109,8 +111,8 @@ static void gpio_set_value(struct gpio_chip *chip __unused,
  * chip:        pointer to GPIO controller chip instance
  * gpio_pin:    pin from which direction needs to be read
  */
-static enum gpio_dir gpio_get_direction(struct gpio_chip *chip __unused,
-					unsigned int gpio_pin)
+static enum gpio_dir secumod_gpio_get_direction(struct gpio_chip *chip __unused,
+						unsigned int gpio_pin)
 {
 	vaddr_t piobu_addr = 0;
 	uint32_t piobu = 0;
@@ -133,8 +135,9 @@ static enum gpio_dir gpio_get_direction(struct gpio_chip *chip __unused,
  * gpio_pin:    pin on which direction needs to be set
  * direction:   direction which needs to be set on pin
  */
-static void gpio_set_direction(struct gpio_chip *chip __unused,
-			       unsigned int gpio_pin, enum gpio_dir direction)
+static void secumod_gpio_set_direction(struct gpio_chip *chip __unused,
+				       unsigned int gpio_pin,
+				       enum gpio_dir direction)
 {
 	vaddr_t piobu_addr = 0;
 
@@ -154,8 +157,9 @@ static void gpio_set_direction(struct gpio_chip *chip __unused,
  * chip:        pointer to GPIO controller chip instance
  * gpio_pin:    pin from which interrupt value needs to be read
  */
-static enum gpio_interrupt gpio_get_interrupt(struct gpio_chip *chip __unused,
-					      unsigned int gpio_pin)
+static enum gpio_interrupt
+secumod_gpio_get_interrupt(struct gpio_chip *chip __unused,
+			   unsigned int gpio_pin)
 {
 	vaddr_t nimpr_addr = secumod_base + SECUMOD_NIMPR;
 	uint32_t data = 0;
@@ -177,9 +181,9 @@ static enum gpio_interrupt gpio_get_interrupt(struct gpio_chip *chip __unused,
  * gpio_pin:    pin on which interrupt value needs to be set
  * interrupt:   interrupt value which needs to be set on pin
  */
-static void gpio_set_interrupt(struct gpio_chip *chip __unused,
-			       unsigned int gpio_pin,
-			       enum gpio_interrupt interrupt)
+static void secumod_gpio_set_interrupt(struct gpio_chip *chip __unused,
+				       unsigned int gpio_pin,
+				       enum gpio_interrupt interrupt)
 {
 	vaddr_t niepr_addr = secumod_base + SECUMOD_NIEPR;
 
@@ -193,13 +197,35 @@ static void gpio_set_interrupt(struct gpio_chip *chip __unused,
 }
 
 static const struct gpio_ops atmel_piobu_ops = {
-	.get_direction = gpio_get_direction,
-	.set_direction = gpio_set_direction,
-	.get_value = gpio_get_value,
-	.set_value = gpio_set_value,
-	.get_interrupt = gpio_get_interrupt,
-	.set_interrupt = gpio_set_interrupt,
+	.get_direction = secumod_gpio_get_direction,
+	.set_direction = secumod_gpio_set_direction,
+	.get_value = secumod_gpio_get_value,
+	.set_value = secumod_gpio_set_value,
+	.get_interrupt = secumod_gpio_get_interrupt,
+	.set_interrupt = secumod_gpio_set_interrupt,
 };
+
+static TEE_Result secumod_dt_get(struct dt_pargs *pargs, void *data,
+				 struct gpio **out_gpio)
+{
+	TEE_Result res = TEE_ERROR_GENERIC;
+	struct gpio *gpio = NULL;
+	struct gpio_chip *chip = data;
+
+	res = gpio_dt_alloc_pin(pargs, &gpio);
+	if (res)
+		return res;
+
+	if (gpio_protected & BIT32(gpio->pin)) {
+		free(gpio);
+		return TEE_ERROR_GENERIC;
+	}
+
+	gpio->chip = chip;
+	*out_gpio = gpio;
+
+	return TEE_SUCCESS;
+}
 
 static enum itr_return secumod_it_handler(struct itr_handler *handler __unused)
 {
@@ -242,8 +268,16 @@ static struct itr_handler secumod_itr_handler = {
 
 static void secumod_interrupt_init(void)
 {
-	itr_add_type_prio(&secumod_itr_handler, IRQ_TYPE_LEVEL_HIGH, 7);
-	itr_enable(secumod_itr_handler.it);
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	secumod_itr_handler.chip = interrupt_get_main_chip();
+
+	res = interrupt_add_configure_handler(&secumod_itr_handler,
+					      IRQ_TYPE_LEVEL_HIGH, 7);
+	if (res)
+		panic();
+
+	interrupt_enable(secumod_itr_handler.chip, secumod_itr_handler.it);
 }
 
 static void secumod_cfg_input_pio(uint8_t gpio_pin, uint32_t config)
@@ -271,7 +305,8 @@ static void secumod_cfg_input_pio(uint8_t gpio_pin, uint32_t config)
 		   def_level << SECUMOD_PIOBU_SWITCH_SHIFT);
 
 	/* Enable Tampering Interrupt */
-	gpio_set_interrupt(&secumod_chip, gpio_pin, GPIO_INTERRUPT_ENABLE);
+	secumod_gpio_set_interrupt(&secumod_chip, gpio_pin,
+				   GPIO_INTERRUPT_ENABLE);
 
 	/* Enable Intrusion Detection */
 	io_setbits32(secumod_base + SECUMOD_NMPR, SECUMOD_PIN_VAL(gpio_pin));
@@ -357,7 +392,7 @@ static TEE_Result atmel_secumod_probe(const void *fdt, int node,
 	if (secumod_base)
 		return TEE_ERROR_GENERIC;
 
-	if (dt_map_dev(fdt, node, &secumod_base, &size) < 0)
+	if (dt_map_dev(fdt, node, &secumod_base, &size, DT_MAP_AUTO) < 0)
 		return TEE_ERROR_GENERIC;
 
 	secumod_hw_init(fdt, node);
@@ -367,7 +402,9 @@ static TEE_Result atmel_secumod_probe(const void *fdt, int node,
 
 	piobu_register_pm();
 
-	return TEE_SUCCESS;
+	assert(gpio_ops_is_valid(&atmel_piobu_ops));
+
+	return gpio_register_provider(fdt, node, secumod_dt_get, &secumod_chip);
 }
 
 static const struct dt_device_match atmel_secumod_match_table[] = {

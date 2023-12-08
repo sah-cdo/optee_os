@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2019-2021, Linaro Limited
- * Copyright (c) 2020, Arm Limited
+ * Copyright (c) 2020-2023, Arm Limited
  */
 
 #ifndef __KERNEL_USER_MODE_CTX_STRUCT_H
@@ -28,6 +28,9 @@
  * @is_32bit:		True if 32-bit TS, false if 64-bit TS
  * @is_initializing:	True if TS is not fully loaded
  * @stack_ptr:		Stack pointer
+ * @bbuf:		Bounce buffer for user buffers
+ * @bbuf_size:		Size of bounce buffer
+ * @bbuf_offs:		Offset to unused part of bounce buffer
  */
 struct user_mode_ctx {
 	struct vm_info vm_info;
@@ -41,6 +44,7 @@ struct user_mode_ctx {
 #endif
 	struct ts_ctx *ts_ctx;
 	uaddr_t entry_func;
+	uaddr_t load_addr;
 	uaddr_t dump_entry_func;
 #ifdef CFG_FTRACE_SUPPORT
 	uaddr_t ftrace_entry_func;
@@ -50,6 +54,9 @@ struct user_mode_ctx {
 	bool is_32bit;
 	bool is_initializing;
 	vaddr_t stack_ptr;
+	uint8_t *bbuf;
+	size_t bbuf_size;
+	size_t bbuf_offs;
 };
 #endif /*__KERNEL_USER_MODE_CTX_STRUCT_H*/
 

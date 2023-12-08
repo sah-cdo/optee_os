@@ -8,22 +8,26 @@
 #include <config.h>
 #include <console.h>
 #include <drivers/gic.h>
+#include <drivers/pinctrl.h>
 #include <drivers/stm32_etzpc.h>
+#include <drivers/stm32_gpio.h>
 #include <drivers/stm32_iwdg.h>
 #include <drivers/stm32_tamp.h>
 #include <drivers/stm32_uart.h>
 #include <drivers/stm32mp1_etzpc.h>
 #include <drivers/stm32mp_dt_bindings.h>
+#include <io.h>
 #include <kernel/boot.h>
 #include <kernel/dt.h>
-#include <kernel/interrupt.h>
 #include <kernel/misc.h>
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
+#include <kernel/tee_misc.h>
 #include <mm/core_memprot.h>
 #include <platform_config.h>
 #include <sm/psci.h>
 #include <stm32_util.h>
+#include <string.h>
 #include <trace.h>
 
 register_phys_mem_pgdir(MEM_AREA_IO_NSEC, APB1_BASE, APB1_SIZE);
@@ -52,14 +56,9 @@ register_ddr(DDR_BASE, CFG_DRAM_SIZE);
 
 static TEE_Result platform_banner(void)
 {
-#ifdef CFG_EMBED_DTB
 	IMSG("Platform stm32mp1: flavor %s - DT %s",
 		ID2STR(PLATFORM_FLAVOR),
 		ID2STR(CFG_EMBED_DTB_SOURCE_FILE));
-#else
-	IMSG("Platform stm32mp1: flavor %s - no device tree",
-		ID2STR(PLATFORM_FLAVOR));
-#endif
 
 	return TEE_SUCCESS;
 }
@@ -111,7 +110,6 @@ void console_init(void)
 	IMSG("Early console on UART#%u", CFG_STM32_EARLY_CONSOLE_UART);
 }
 
-#ifdef CFG_EMBED_DTB
 static TEE_Result init_console_from_dt(void)
 {
 	struct stm32_uart_pdata *pd = NULL;
@@ -149,29 +147,20 @@ static TEE_Result init_console_from_dt(void)
 
 /* Probe console from DT once clock inits (service init level) are completed */
 service_init_late(init_console_from_dt);
-#endif
 
 /*
  * GIC init, used also for primary/secondary boot core wake completion
  */
-static struct gic_data gic_data;
-
-void itr_core_handler(void)
+void boot_primary_init_intc(void)
 {
-	gic_it_handle(&gic_data);
-}
-
-void main_init_gic(void)
-{
-	gic_init(&gic_data, GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
-	itr_init(&gic_data.chip);
+	gic_init(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
 
 	stm32mp_register_online_cpu();
 }
 
-void main_secondary_init_gic(void)
+void boot_secondary_init_intc(void)
 {
-	gic_cpu_init(&gic_data);
+	gic_cpu_init();
 
 	stm32mp_register_online_cpu();
 }
@@ -223,7 +212,7 @@ static TEE_Result set_etzpc_secure_configuration(void)
 	/* RNG is secure */
 	config_lock_decprot(STM32MP1_ETZPC_RNG_ID, ETZPC_DECPROT_S_RW);
 	/* SAES is secure */
-	config_lock_decprot(STM32MP1_ETZPC_SAES_ID, ETZPC_DECPROT_NS_RW);
+	config_lock_decprot(STM32MP1_ETZPC_SAES_ID, ETZPC_DECPROT_S_RW);
 	config_lock_decprot(STM32MP1_ETZPC_SDMMC1_ID, ETZPC_DECPROT_NS_RW);
 	config_lock_decprot(STM32MP1_ETZPC_SDMMC2_ID, ETZPC_DECPROT_NS_RW);
 	config_lock_decprot(STM32MP1_ETZPC_SPI4_ID, ETZPC_DECPROT_NS_RW);
@@ -252,61 +241,164 @@ static TEE_Result set_etzpc_secure_configuration(void)
 
 driver_init_late(set_etzpc_secure_configuration);
 #endif /* CFG_STM32_ETZPC */
+#endif /* CFG_STM32MP13 */
 
-#ifdef CFG_STM32_GPIO
+#ifdef CFG_STM32MP15
+/*
+ * This concerns OP-TEE pager for STM32MP1 to use secure internal
+ * RAMs to execute. TZSRAM refers the TZSRAM_BASE/TZSRAM_SIZE
+ * used in boot.c to locate secure unpaged memory.
+ *
+ * STM32MP15 variants embed 640kB of contiguous securable SRAMs
+ *
+ *  +--------------+ <-- SYSRAM_BASE
+ *  |              |     lower part can be assigned to secure world
+ *  | SYSRAM 256kB |     4kB granule boundary
+ *  |              |     upper part can be assigned to secure world
+ *  +--------------+ <-- SRAM1_BASE (= SYSRAM_BASE + SYSRAM_SIZE)
+    |              |     full range assigned to non-secure world or
+ *  | SRAM1  128kB |     to secure world, or to- Cortex-M4 exclusive access
+ *  +--------------+ <-- SRAM2_BASE (= SRAM1_BASE + SRAM1_SIZE)
+    |              |     full range assigned to non-secure world or
+ *  | SRAM2  128kB |     to secure world, or to- Cortex-M4 exclusive access
+ *  +--------------+ <-- SRAM3_BASE (= SRAM2_BASE + SRAM2_SIZE)
+    |              |     full range assigned to non-secure world or
+ *  | SRAM3   64kB |     to secure world, or to- Cortex-M4 exclusive access
+ *  +--------------+ <-- SRAM4_BASE (= SRAM3_BASE + SRAM3_SIZE)
+    |              |     full range assigned to non-secure world or
+ *  | SRAM4   64kB |     to secure world, or to- Cortex-M4 exclusive access
+ *  +--------------+ <-- SRAM4_BASE + SRAM4_SIZE
+ *
+ * If SRAMx memories are not used for the companion Cortex-M4
+ * processor, OP-TEE can use this memory.
+ *
+ * SYSRAM configuration for secure/non-secure boundaries requires the
+ * secure SYSRAM memory to start at the SYSRAM physical base address and grow
+ * from there while the non-secure SYSRAM range lies at SYSRAM end addresses
+ * with a 4KB page granule.
+ *
+ * SRAM1, SRAM2, SRAM3 and SRAM4 are independently assigned to secure world,
+ * to non-secure world or possibly to Cortex-M4 exclusive access. Each
+ * assignment covers the full related SRAMx memory range.
+ *
+ * Using non-secure SYSRAM or one of the SRAMx for SCMI message communication
+ * can be done using CFG_STM32MP1_SCMI_SHM_BASE/CFG_STM32MP1_SCMI_SHM_SIZE.
+ * This imposes related memory area is assigned to non-secure world.
 
-#define NB_PINS_PER_BANK		U(16)
-#define NB_PINS_BANK_H			U(14)
-#define NB_PINS_BANK_I			U(8)
+ * Using secure internal memories (SYSRAM and/or some SRAMx) with STM32MP15
+ * shall meet this constraints known the TZSRAM physical memory range shall
+ * be contiguous.
+ */
 
-static TEE_Result set_all_gpios_non_secure(void)
+#define SYSRAM_END			(SYSRAM_BASE + SYSRAM_SIZE)
+#define SYSRAM_SEC_END			(SYSRAM_BASE + SYSRAM_SEC_SIZE)
+#define SRAMS_END			(SRAM4_BASE + SRAM4_SIZE)
+#define SRAMS_START			SRAM1_BASE
+#define TZSRAM_END			(CFG_TZSRAM_START + CFG_TZSRAM_SIZE)
+
+#define SCMI_SHM_IS_IN_SRAMX	((CFG_STM32MP1_SCMI_SHM_BASE >= SRAM1_BASE) && \
+				 (CFG_STM32MP1_SCMI_SHM_BASE + \
+				  CFG_STM32MP1_SCMI_SHM_SIZE) <= SRAMS_END)
+
+#define TZSRAM_FITS_IN_SYSRAM_SEC	((CFG_TZSRAM_START >= SYSRAM_BASE) && \
+					 (TZSRAM_END <= SYSRAM_SEC_END))
+
+#define TZSRAM_FITS_IN_SYSRAM_AND_SRAMS	((CFG_TZSRAM_START >= SYSRAM_BASE) && \
+					 (CFG_TZSRAM_START < SYSRAM_END) && \
+					 (TZSRAM_END > SYSRAM_END) && \
+					 (TZSRAM_END <= SRAMS_END) && \
+					 (SYSRAM_SIZE == SYSRAM_SEC_SIZE))
+
+#define TZSRAM_FITS_IN_SRAMS	((CFG_TZSRAM_START >= SRAMS_START) && \
+				 (CFG_TZSRAM_START < SRAMS_END) && \
+				 (TZSRAM_END <= SRAMS_END))
+
+#define TZSRAM_IS_IN_DRAM	(CFG_TZSRAM_START >= CFG_DRAM_BASE)
+
+#ifdef CFG_WITH_PAGER
+/*
+ * At build time, we enforce that, when pager is used,
+ * either TZSRAM fully fits inside SYSRAM secure address range,
+ * or TZSRAM fully fits inside the full SYSRAM and spread inside SRAMx orderly,
+ * or TZSRAM fully fits some inside SRAMs address range,
+ * or TZSRAM is in DDR for debug and test purpose.
+ */
+static_assert(TZSRAM_FITS_IN_SYSRAM_SEC || TZSRAM_FITS_IN_SYSRAM_AND_SRAMS ||
+	      TZSRAM_FITS_IN_SRAMS || TZSRAM_IS_IN_DRAM);
+#endif
+
+#if TZSRAM_FITS_IN_SYSRAM_AND_SRAMS || TZSRAM_FITS_IN_SRAMS || \
+	SCMI_SHM_IS_IN_SRAMX
+/* At run time we enforce that SRAM1 to SRAM4 are properly assigned if used */
+static TEE_Result init_stm32mp15_secure_srams(void)
 {
-	unsigned int bank = 0;
-	unsigned int pin = 0;
-	unsigned int nb_pin_bank = 0;
+	if (IS_ENABLED(CFG_WITH_PAGER)) {
+		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
+					     SRAM1_BASE, SRAM1_SIZE))
+			stm32mp_register_secure_periph_iomem(SRAM1_BASE);
 
-	for (bank = 0; bank <= GPIO_BANK_I; bank++) {
-		switch (bank) {
-		case GPIO_BANK_H:
-			nb_pin_bank = NB_PINS_BANK_H;
-			break;
-		case GPIO_BANK_I:
-			nb_pin_bank = NB_PINS_BANK_I;
-			break;
-		default:
-			nb_pin_bank = NB_PINS_PER_BANK;
-			break;
-		}
+		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
+					     SRAM2_BASE, SRAM2_SIZE))
+			stm32mp_register_secure_periph_iomem(SRAM2_BASE);
 
-		for (pin = 0; pin <= nb_pin_bank; pin++)
-			stm32_gpio_set_secure_cfg(bank, pin, false);
+		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
+					     SRAM3_BASE, SRAM3_SIZE))
+			stm32mp_register_secure_periph_iomem(SRAM3_BASE);
+
+		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
+					     SRAM4_BASE, SRAM4_SIZE))
+			stm32mp_register_secure_periph_iomem(SRAM4_BASE);
+	}
+
+	if (SCMI_SHM_IS_IN_SRAMX) {
+		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
+					     CFG_STM32MP1_SCMI_SHM_SIZE,
+					     SRAM1_BASE, SRAM1_SIZE))
+			stm32mp_register_non_secure_periph_iomem(SRAM1_BASE);
+
+		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
+					     CFG_STM32MP1_SCMI_SHM_SIZE,
+					     SRAM2_BASE, SRAM2_SIZE))
+			stm32mp_register_non_secure_periph_iomem(SRAM2_BASE);
+
+		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
+					     CFG_STM32MP1_SCMI_SHM_SIZE,
+					     SRAM3_BASE, SRAM3_SIZE))
+			stm32mp_register_non_secure_periph_iomem(SRAM3_BASE);
+
+		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
+					     CFG_STM32MP1_SCMI_SHM_SIZE,
+					     SRAM4_BASE, SRAM4_SIZE))
+			stm32mp_register_non_secure_periph_iomem(SRAM4_BASE);
 	}
 
 	return TEE_SUCCESS;
 }
 
-early_init_late(set_all_gpios_non_secure);
-#endif /* CFG_STM32_GPIO */
-#endif /* CFG_STM32MP13 */
+service_init_late(init_stm32mp15_secure_srams);
+#endif /* TZSRAM_FITS_IN_SYSRAM_AND_SRAMS || TZSRAM_FITS_IN_SRAMS */
+#endif /* CFG_STM32MP15 && CFG_TZSRAM_START */
 
 static TEE_Result init_stm32mp1_drivers(void)
 {
-	/* Without secure DTB support, some drivers must be inited */
-	if (!IS_ENABLED(CFG_EMBED_DTB))
-		stm32_etzpc_init(ETZPC_BASE);
-
 	/* Secure internal memories for the platform, once ETZPC is ready */
 	etzpc_configure_tzma(0, ETZPC_TZMA_ALL_SECURE);
 	etzpc_lock_tzma(0);
 
-#ifdef CFG_TZSRAM_START
-	COMPILE_TIME_ASSERT(((SYSRAM_BASE + SYSRAM_SIZE) <= CFG_TZSRAM_START) ||
-			    ((SYSRAM_BASE <= CFG_TZSRAM_START) &&
-			     (SYSRAM_SEC_SIZE >= CFG_TZSRAM_SIZE)));
-#endif /* CFG_TZSRAM_START */
-
 	etzpc_configure_tzma(1, SYSRAM_SEC_SIZE >> SMALL_PAGE_SHIFT);
 	etzpc_lock_tzma(1);
+
+	if (SYSRAM_SIZE > SYSRAM_SEC_SIZE) {
+		size_t nsec_size = SYSRAM_SIZE - SYSRAM_SEC_SIZE;
+		paddr_t nsec_start = SYSRAM_BASE + SYSRAM_SEC_SIZE;
+		uint8_t *va = phys_to_virt(nsec_start, MEM_AREA_IO_NSEC,
+					   nsec_size);
+
+		IMSG("Non-secure SYSRAM [%p %p]", va, va + nsec_size - 1);
+
+		/* Clear content from the non-secure part */
+		memset(va, 0, nsec_size);
+	}
 
 	return TEE_SUCCESS;
 }
@@ -359,19 +451,6 @@ void stm32mp_get_bsec_static_cfg(struct stm32_bsec_static_cfg *cfg)
 	cfg->max_id = STM32MP1_OTP_MAX_ID;
 }
 
-bool stm32mp_is_closed_device(void)
-{
-	uint32_t otp = 0;
-	TEE_Result result = TEE_ERROR_GENERIC;
-
-	/* Non closed_device platform expects fuse well programmed to 0 */
-	result = stm32_bsec_shadow_read_otp(&otp, DATA0_OTP);
-	if (!result && !(otp & BIT(DATA0_OTP_SECURED_POS)))
-		return false;
-
-	return true;
-}
-
 bool __weak stm32mp_with_pmic(void)
 {
 	return false;
@@ -421,70 +500,14 @@ static bool __maybe_unused bank_is_valid(unsigned int bank)
 	panic();
 }
 
-vaddr_t stm32_get_gpio_bank_base(unsigned int bank)
-{
-	static struct io_pa_va base = { .pa = GPIOA_BASE };
-
-	static_assert(GPIO_BANK_A == 0);
-	assert(bank_is_valid(bank));
-
-	if (IS_ENABLED(CFG_STM32MP15)) {
-		static struct io_pa_va zbase = { .pa = GPIOZ_BASE };
-
-		/* Get secure mapping address for GPIOZ */
-		if (bank == GPIO_BANK_Z)
-			return io_pa_or_va_secure(&zbase, GPIO_BANK_OFFSET);
-
-		/* Other are mapped non-secure */
-		return io_pa_or_va_nsec(&base, (bank + 1) * GPIO_BANK_OFFSET) +
-		       (bank * GPIO_BANK_OFFSET);
-	}
-
-	if (IS_ENABLED(CFG_STM32MP13))
-		return io_pa_or_va_secure(&base,
-					  (bank + 1) * GPIO_BANK_OFFSET) +
-		       (bank * GPIO_BANK_OFFSET);
-
-	panic();
-}
-
-unsigned int stm32_get_gpio_bank_offset(unsigned int bank)
-{
-	assert(bank_is_valid(bank));
-
-	if (bank == GPIO_BANK_Z)
-		return 0;
-
-	return bank * GPIO_BANK_OFFSET;
-}
-
-unsigned int stm32_get_gpio_bank_clock(unsigned int bank)
-{
-	assert(bank_is_valid(bank));
-
-#ifdef CFG_STM32MP15
-	if (bank == GPIO_BANK_Z)
-		return GPIOZ;
-#endif
-
-	return GPIOA + bank;
-}
-
-struct clk *stm32_get_gpio_bank_clk(unsigned int bank)
-{
-	assert(bank_is_valid(bank));
-
-	if (!IS_ENABLED(CFG_DRIVERS_CLK))
-		return NULL;
-
-	return stm32mp_rcc_clock_id_to_clk(stm32_get_gpio_bank_clock(bank));
-}
-
 #ifdef CFG_STM32_IWDG
 TEE_Result stm32_get_iwdg_otp_config(paddr_t pbase,
 				     struct stm32_iwdg_otp_data *otp_data)
 {
 	unsigned int idx = 0;
+	uint32_t otp_id = 0;
+	size_t bit_len = 0;
+	uint8_t bit_offset = 0;
 	uint32_t otp_value = 0;
 
 	switch (pbase) {
@@ -498,7 +521,12 @@ TEE_Result stm32_get_iwdg_otp_config(paddr_t pbase,
 		panic();
 	}
 
-	if (stm32_bsec_read_otp(&otp_value, HW2_OTP))
+	if (stm32_bsec_find_otp_in_nvmem_layout("hw2_otp", &otp_id, &bit_offset,
+						&bit_len) ||
+	    bit_len != 32 || bit_offset != 0)
+		panic();
+
+	if (stm32_bsec_read_otp(&otp_value, otp_id))
 		panic();
 
 	otp_data->hw_enabled = otp_value &
@@ -511,3 +539,38 @@ TEE_Result stm32_get_iwdg_otp_config(paddr_t pbase,
 	return TEE_SUCCESS;
 }
 #endif /*CFG_STM32_IWDG*/
+
+#ifdef CFG_STM32_DEBUG_ACCESS
+static TEE_Result init_debug(void)
+{
+	TEE_Result res = TEE_SUCCESS;
+	uint32_t conf = stm32_bsec_read_debug_conf();
+	struct clk *dbg_clk = stm32mp_rcc_clock_id_to_clk(CK_DBG);
+	uint32_t state = 0;
+
+	res = stm32_bsec_get_state(&state);
+	if (res)
+		return res;
+
+	if (state != BSEC_STATE_SEC_CLOSED && conf) {
+		if (IS_ENABLED(CFG_INSECURE))
+			IMSG("WARNING: All debug accesses are allowed");
+
+		res = stm32_bsec_write_debug_conf(conf | BSEC_DEBUG_ALL);
+		if (res)
+			return res;
+
+		/*
+		 * Enable DBG clock as used to access coprocessor
+		 * debug registers
+		 */
+		clk_enable(dbg_clk);
+	}
+
+	return TEE_SUCCESS;
+}
+early_init_late(init_debug);
+#endif /* CFG_STM32_DEBUG_ACCESS */
+
+/* Some generic resources need to be unpaged */
+DECLARE_KEEP_PAGER(pinctrl_apply_state);

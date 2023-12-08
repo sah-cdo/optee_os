@@ -10,8 +10,11 @@
 #include <io.h>
 #include <kernel/delay.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
+#include <kernel/interrupt.h>
 #include <kernel/pm.h>
 #include <matrix.h>
+#include <mm/core_mmu.h>
 #include <sama5d2.h>
 #include <tee_api_types.h>
 
@@ -174,6 +177,8 @@ static void atmel_wdt_init_hw(struct atmel_wdt *wdt)
 
 	/* Enable interrupt, and disable watchdog in debug and idle */
 	wdt->mr |= WDT_MR_WDFIEN | WDT_MR_WDDBGHLT | WDT_MR_WDIDLEHLT;
+	/* Enable watchdog reset */
+	wdt->mr |= WDT_MR_WDRSTEN;
 	wdt->mr |= WDT_MR_WDD_SET(SEC_TO_WDT(WDT_MAX_TIMEOUT));
 	wdt->mr |= WDT_MR_WDV_SET(SEC_TO_WDT(WDT_DEFAULT_TIMEOUT));
 
@@ -226,9 +231,10 @@ static TEE_Result wdt_node_probe(const void *fdt, int node,
 	uint32_t irq_type = 0;
 	uint32_t irq_prio = 0;
 	int it = DT_INFO_INVALID_INTERRUPT;
-	struct itr_handler *it_hdlr;
+	struct itr_handler *it_hdlr = NULL;
+	TEE_Result res = TEE_ERROR_GENERIC;
 
-	if (_fdt_get_status(fdt, node) != DT_STATUS_OK_SEC)
+	if (fdt_get_status(fdt, node) != DT_STATUS_OK_SEC)
 		return TEE_ERROR_BAD_PARAMETERS;
 
 	matrix_configure_periph_secure(AT91C_ID_WDT);
@@ -241,28 +247,37 @@ static TEE_Result wdt_node_probe(const void *fdt, int node,
 
 	it = dt_get_irq_type_prio(fdt, node, &irq_type, &irq_prio);
 	if (it == DT_INFO_INVALID_INTERRUPT)
-		goto err_free_wdt;
+		goto err_free;
 
-	it_hdlr = itr_alloc_add_type_prio(it, &atmel_wdt_itr_cb, 0, wdt,
-					  irq_type, irq_prio);
-	if (!it_hdlr)
-		goto err_free_wdt;
+	res = interrupt_alloc_add_conf_handler(interrupt_get_main_chip(),
+					       it, atmel_wdt_itr_cb, 0, wdt,
+					       irq_type, irq_prio, &it_hdlr);
+	if (res)
+		goto err_free;
 
-	if (dt_map_dev(fdt, node, &wdt->base, &size) < 0)
-		goto err_free_itr_handler;
+	if (dt_map_dev(fdt, node, &wdt->base, &size, DT_MAP_AUTO) < 0)
+		goto err_remove_handler;
 
 	/* Get current state of the watchdog */
 	wdt->mr = io_read32(wdt->base + WDT_MR) & WDT_MR_WDDIS;
 
 	atmel_wdt_init_hw(wdt);
-	itr_enable(it);
+	interrupt_enable(it_hdlr->chip, it_hdlr->it);
+
+	res = watchdog_register(&wdt->chip);
+	if (res)
+		goto err_disable_unmap;
+
 	atmel_wdt_register_pm(wdt);
 
-	return watchdog_register(&wdt->chip);
+	return TEE_SUCCESS;
 
-err_free_itr_handler:
-	itr_free(it_hdlr);
-err_free_wdt:
+err_disable_unmap:
+	interrupt_disable(it_hdlr->chip, it_hdlr->it);
+	core_mmu_remove_mapping(MEM_AREA_IO_SEC, (void *)wdt->base, size);
+err_remove_handler:
+	interrupt_remove_free_handler(it_hdlr);
+err_free:
 	free(wdt);
 
 	return TEE_ERROR_GENERIC;

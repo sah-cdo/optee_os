@@ -36,13 +36,13 @@ endif
 
 cppflags-lib-y += -DLTC_NO_HASHES
 
-ifeq ($(_CFG_CORE_LTC_MD5),y)
+ifeq ($(_CFG_CORE_LTC_MD5_DESC),y)
 	cppflags-lib-y += -DLTC_MD5
 endif
-ifeq ($(_CFG_CORE_LTC_SHA1),y)
+ifeq ($(_CFG_CORE_LTC_SHA1_DESC),y)
 	cppflags-lib-y += -DLTC_SHA1
 endif
-ifeq ($(_CFG_CORE_LTC_SHA224),y)
+ifeq ($(_CFG_CORE_LTC_SHA224_DESC),y)
 	cppflags-lib-y += -DLTC_SHA224
 endif
 ifeq ($(_CFG_CORE_LTC_SHA256_DESC),y)
@@ -57,6 +57,8 @@ endif
 ifeq ($(_CFG_CORE_LTC_SHA512_256),y)
 	cppflags-lib-y += -DLTC_SHA512_256
 endif
+cppflags-lib-$(_CFG_CORE_LTC_SHA3_DESC) += -DLTC_SHA3
+
 
 cppflags-lib-y += -DLTC_NO_MACS
 
@@ -132,6 +134,13 @@ srcs-$(_CFG_CORE_LTC_SHA1_ACCEL) += sha1_accel.c
 ifeq ($(_CFG_CORE_LTC_SHA256_DESC),y)
 srcs-$(_CFG_CORE_LTC_SHA256_ACCEL) += sha256_accel.c
 endif
+ifeq ($(_CFG_CORE_LTC_SHA512_DESC),y)
+srcs-$(_CFG_CORE_LTC_SHA512_ACCEL) += sha512_accel.c
+endif
+ifeq ($(_CFG_CORE_LTC_SHA3_DESC),y)
+srcs-y += shake.c
+srcs-$(_CFG_CORE_LTC_SHA3_ACCEL) += sha3_accel.c
+endif
 srcs-$(_CFG_CORE_LTC_SM2_DSA) += sm2-dsa.c
 srcs-$(_CFG_CORE_LTC_SM2_PKE) += sm2-pke.c
 srcs-$(_CFG_CORE_LTC_SM2_KEP) += sm2-kep.c
@@ -139,6 +148,7 @@ srcs-$(_CFG_CORE_LTC_X25519) += x25519.c
 srcs-$(_CFG_CORE_LTC_ED25519) += ed25519.c
 ifeq ($(_CFG_CORE_LTC_ACIPHER),y)
 srcs-y += mpi_desc.c
+cppflags-mpi_desc.c-y += -DMBEDTLS_ALLOW_PRIVATE_ACCESS
 endif
 
 srcs-y += tomcrypt.c

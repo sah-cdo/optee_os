@@ -8,6 +8,11 @@ $(call force,CFG_LS,y)
 $(call force,CFG_DRAM0_BASE,0x80000000)
 $(call force,CFG_TEE_OS_DRAM0_SIZE,0x4000000)
 
+CFG_ENABLE_EMBEDDED_TESTS ?= y
+CFG_PKCS11_TA ?= y
+
+CFG_CORE_HEAP_SIZE ?= 131072
+
 ifeq ($(PLATFORM_FLAVOR),ls1012ardb)
 include core/arch/arm/cpu/cortex-armv8-0.mk
 $(call force,CFG_TEE_CORE_NB_CORE,1)
@@ -124,16 +129,3 @@ CFG_CRYPTO_SIZE_OPTIMIZATION ?= n
 # NXP CAAM support is not enabled by default and can be enabled
 # on the command line
 CFG_NXP_CAAM ?= n
-
-ifeq ($(CFG_NXP_CAAM),y)
-# If NXP CAAM Driver is supported, the Crypto Driver interfacing
-# it with generic crypto API can be enabled.
-CFG_CRYPTO_DRIVER ?= y
-CFG_CRYPTO_DRIVER_DEBUG ?= 0
-else
-$(call force,CFG_CRYPTO_DRIVER,n)
-$(call force,CFG_WITH_SOFTWARE_PRNG,y)
-endif
-
-# Cryptographic configuration
-include core/arch/arm/plat-ls/crypto_conf.mk

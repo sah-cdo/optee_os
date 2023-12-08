@@ -4,8 +4,8 @@
  * Copyright (c) 2019-2021, Linaro Limited
  */
 
-#ifndef SCMI_MSG_H
-#define SCMI_MSG_H
+#ifndef __DRIVERS_SCMI_MSG_H
+#define __DRIVERS_SCMI_MSG_H
 
 #include <compiler.h>
 #include <kernel/panic.h>
@@ -141,6 +141,26 @@ static inline TEE_Result scmi_msg_threaded_entry(unsigned int chan_id __unused,
 						 size_t in_size __unused,
 						 void *out_buf __unused,
 						 size_t *out_size __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
+#endif
+
+struct clk;
+
+#ifdef CFG_SCMI_MSG_USE_CLK
+/*
+ * Expose a clock through SCMI
+ * @clk: Clock to be exposed
+ * @channel_id: SCMI server channel exposing the clock
+ * @scmi_id: SCMI ID of the clock within the channel
+ */
+TEE_Result scmi_clk_add(struct clk *clk, unsigned int channel_id,
+			unsigned int scmi_id);
+#else
+static inline TEE_Result scmi_clk_add(struct clk *clk __unused,
+				      unsigned int channel_id __unused,
+				      unsigned int scmi_id __unused)
 {
 	return TEE_ERROR_NOT_SUPPORTED;
 }
@@ -314,7 +334,7 @@ int32_t plat_scmi_rd_set_state(unsigned int channel_id, unsigned int scmi_id,
 size_t plat_scmi_voltd_count(unsigned int channel_id);
 
 /*
- * Get clock controller string ID (aka name)
+ * Get voltage domain string ID (aka name)
  * @channel_id: SCMI channel ID
  * @scmi_id: SCMI voltage domain ID
  * Return pointer to name or NULL
@@ -361,7 +381,7 @@ int32_t plat_scmi_voltd_get_level(unsigned int channel_id, unsigned int scmi_id,
 /*
  * Set voltage domain level voltage domain
  * @channel_id: SCMI channel ID
- * @scmi_id: SCMI clock ID
+ * @scmi_id: SCMI voltage domain ID
  * @level: Target voltage domain level in microvolt
  * Return a compliant SCMI error code
  */
@@ -388,4 +408,4 @@ int32_t plat_scmi_voltd_get_config(unsigned int channel_id,
 int32_t plat_scmi_voltd_set_config(unsigned int channel_id,
 				   unsigned int scmi_id, uint32_t config);
 
-#endif /* SCMI_MSG_H */
+#endif /* __DRIVERS_SCMI_MSG_H */

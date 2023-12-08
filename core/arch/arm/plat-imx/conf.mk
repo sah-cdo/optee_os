@@ -78,6 +78,7 @@ mx8qm-flavorlist = \
 
 mx8qx-flavorlist = \
 	mx8qxpmek \
+	mx8dxmek \
 
 mx8dxl-flavorlist = \
 	mx8dxlevk \
@@ -157,7 +158,7 @@ else ifneq (,$(filter $(PLATFORM_FLAVOR),$(mx7ulp-flavorlist)))
 $(call force,CFG_MX7ULP,y)
 $(call force,CFG_TEE_CORE_NB_CORE,1)
 $(call force,CFG_TZC380,n)
-$(call force,CFG_CSU,n)
+$(call force,CFG_IMX_CSU,n)
 include core/arch/arm/cpu/cortex-a7.mk
 else ifneq (,$(filter $(PLATFORM_FLAVOR),$(mx8mq-flavorlist)))
 $(call force,CFG_MX8MQ,y)
@@ -207,7 +208,6 @@ CFG_IMX_LPUART ?= y
 CFG_DRAM_BASE ?= 0x80000000
 $(call force,CFG_TEE_CORE_NB_CORE,2)
 $(call force,CFG_IMX_OCOTP,n)
-$(call force,CFG_NXP_CAAM,n)
 else ifneq (,$(filter $(PLATFORM_FLAVOR),$(mx8ulp-flavorlist)))
 $(call force,CFG_MX8ULP,y)
 $(call force,CFG_ARM64_core,y)
@@ -217,6 +217,7 @@ CFG_TEE_CORE_NB_CORE ?= 2
 $(call force,CFG_NXP_SNVS,n)
 $(call force,CFG_IMX_OCOTP,n)
 CFG_IMX_MU ?= y
+CFG_IMX_ELE ?= y
 else ifneq (,$(filter $(PLATFORM_FLAVOR),$(mx93-flavorlist)))
 $(call force,CFG_MX93,y)
 $(call force,CFG_ARM64_core,y)
@@ -228,6 +229,8 @@ $(call force,CFG_IMX_OCOTP,n)
 $(call force,CFG_TZC380,n)
 $(call force,CFG_CRYPTO_DRIVER,n)
 $(call force,CFG_NXP_CAAM,n)
+CFG_IMX_MU ?= y
+CFG_IMX_ELE ?= y
 else
 $(error Unsupported PLATFORM_FLAVOR "$(PLATFORM_FLAVOR)")
 endif
@@ -396,9 +399,18 @@ CFG_NSEC_DDR_1_SIZE  ?= 0x380000000UL
 CFG_CORE_ARM64_PA_BITS ?= 40
 endif
 
+ifneq (,$(filter $(PLATFORM_FLAVOR),mx8dxmek))
+CFG_DDR_SIZE ?= 0x40000000
+CFG_UART_BASE ?= UART0_BASE
+$(call force,CFG_MX8DX,y)
+endif
+
 ifneq (,$(filter $(PLATFORM_FLAVOR),mx8dxlevk))
 CFG_DDR_SIZE ?= 0x40000000
 CFG_UART_BASE ?= UART0_BASE
+CFG_NSEC_DDR_1_BASE ?= 0x800000000UL
+CFG_NSEC_DDR_1_SIZE ?= 0x400000000UL
+CFG_CORE_ARM64_PA_BITS ?= 40
 endif
 
 ifneq (,$(filter $(PLATFORM_FLAVOR),mx8ulpevk))
@@ -420,7 +432,7 @@ $(call force,CFG_PL310,y)
 
 CFG_PL310_LOCKED ?= y
 CFG_ENABLE_SCTLR_RR ?= y
-CFG_SCU ?= y
+CFG_IMX_SCU ?= y
 endif
 
 ifeq ($(filter y, $(CFG_MX6QP) $(CFG_MX6Q) $(CFG_MX6D) $(CFG_MX6DL) $(CFG_MX6S)), y)
@@ -462,7 +474,7 @@ CFG_IMX_SNVS ?= y
 endif
 
 ifneq (,$(filter y, $(CFG_MX6) $(CFG_MX7)))
-CFG_CSU ?= y
+CFG_IMX_CSU ?= y
 endif
 
 ifeq ($(filter y, $(CFG_PSCI_ARM32)), y)
@@ -488,8 +500,11 @@ CFG_SHMEM_SIZE ?= 0x00200000
 CFG_TZDRAM_START ?= ($(CFG_DRAM_BASE) - $(CFG_TZDRAM_SIZE) - $(CFG_SHMEM_SIZE) + $(CFG_DDR_SIZE))
 CFG_SHMEM_START ?= ($(CFG_TZDRAM_START) + $(CFG_TZDRAM_SIZE))
 
-CFG_NSEC_DDR_0_BASE ?= $(CFG_DRAM_BASE)
-CFG_NSEC_DDR_0_SIZE ?= ($(CFG_DDR_SIZE) - $(CFG_TZDRAM_SIZE) - $(CFG_SHMEM_SIZE))
+# Enable embedded tests by default
+CFG_ENABLE_EMBEDDED_TESTS ?= y
+
+# Set default heap size for imx platforms to 128k
+CFG_CORE_HEAP_SIZE ?= 131072
 
 CFG_CRYPTO_SIZE_OPTIMIZATION ?= n
 CFG_MMAP_REGIONS ?= 24
@@ -499,6 +514,8 @@ ifeq ($(CFG_NXP_SE05X),y)
 $(call force,CFG_IMX_OCOTP,n)
 endif
 CFG_IMX_OCOTP ?= y
+CFG_IMX_DIGPROG ?= y
+CFG_PKCS11_TA ?= y
 
 # Almost all platforms include CAAM HW Modules, except the
 # ones forced to be disabled
@@ -510,15 +527,11 @@ CFG_IMX_SC ?= y
 CFG_IMX_MU ?= y
 endif
 
-# As NXP CAAM Driver is enabled, disable the small local CAAM driver
-# used just to release Job Rings to Non-Secure world
-$(call force,CFG_IMX_CAAM,n)
 else
 
 ifneq (,$(filter y, $(CFG_MX6) $(CFG_MX7) $(CFG_MX7ULP)))
 CFG_IMX_CAAM ?= y
 endif
+
 endif
 
-# Cryptographic configuration
-include core/arch/arm/plat-imx/crypto_conf.mk

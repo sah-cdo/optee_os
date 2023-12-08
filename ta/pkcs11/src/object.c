@@ -160,6 +160,8 @@ void destroy_object(struct pkcs11_session *session, struct pkcs11_object *obj,
 		handle_put(get_object_handle_db(session),
 			   pkcs11_object2handle(obj, session));
 		cleanup_persistent_object(obj, session->token);
+
+		token_invalidate_object_handles(obj);
 	} else {
 		handle_put(get_object_handle_db(session),
 			   pkcs11_object2handle(obj, session));
@@ -830,6 +832,15 @@ enum pkcs11_rc entry_get_attribute_value(struct pkcs11_client *client,
 		TEE_MemMove(&cli_head, cli_ref, sizeof(cli_head));
 
 		len = sizeof(*cli_ref) + cli_head.size;
+
+		/* Treat hidden attributes as missing attributes */
+		if (attribute_is_hidden(&cli_head)) {
+			cli_head.size = PKCS11_CK_UNAVAILABLE_INFORMATION;
+			TEE_MemMove(&cli_ref->size, &cli_head.size,
+				    sizeof(cli_head.size));
+			attr_type_invalid = 1;
+			continue;
+		}
 
 		/* We don't support getting value of indirect templates */
 		if (pkcs11_attr_has_indirect_attributes(cli_head.id)) {

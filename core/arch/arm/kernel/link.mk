@@ -15,7 +15,7 @@ link-ldflags-common += $(call ld-option,--no-warn-execstack)
 endif
 
 link-ldflags  = $(LDFLAGS)
-ifeq ($(CFG_CORE_ASLR),y)
+ifeq ($(call cfg-one-enabled, CFG_CORE_ASLR CFG_CORE_PHYS_RELOCATABLE),y)
 link-ldflags += -pie -Bsymbolic -z norelro $(ldflag-apply-dynamic-relocs)
 ifeq ($(CFG_ARM64_core),y)
 link-ldflags += -z text
@@ -251,6 +251,7 @@ $(link-out-dir)/tee.mem_usage: $(link-out-dir)/tee.elf
 	$(q)$(PYTHON3) ./scripts/mem_usage.py $< > $@
 endif
 
+all: $(link-out-dir)/tee-raw.bin
 cleanfiles += $(link-out-dir)/tee-raw.bin
 $(link-out-dir)/tee-raw.bin: $(link-out-dir)/tee.elf scripts/gen_tee_bin.py
 	@$(cmd-echo-silent) '  GEN     $@'

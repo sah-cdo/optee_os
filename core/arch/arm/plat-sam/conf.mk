@@ -3,6 +3,7 @@ PLATFORM_FLAVOR ?= sama5d27_som1_ek
 flavor_dts_file-sama5d2xult = at91-sama5d2_xplained.dts
 flavor_dts_file-sama5d2_xplained = at91-sama5d2_xplained.dts
 flavor_dts_file-sama5d27_som1_ek = at91-sama5d27_som1_ek.dts
+flavor_dts_file-sama5d27_wlsom1_ek = at91-sama5d27_wlsom1_ek.dts
 
 ifeq ($(PLATFORM_FLAVOR),sama5d2xult)
 $(warning "sama5d2xult is deprecated, please use sama5d2_xplained")
@@ -42,6 +43,9 @@ CFG_MMAP_REGIONS ?= 24
 
 CFG_SHMEM_START  ?= 0x21000000
 CFG_SHMEM_SIZE   ?= 0x400000
+
+CFG_SCMI_SHMEM_START  ?= 0x21400000
+CFG_SCMI_SHMEM_SIZE   ?= 0x1000
 
 CFG_TEE_RAM_VA_SIZE ?= 0x100000
 
@@ -85,3 +89,22 @@ CFG_DRIVERS_RTC ?= y
 CFG_RTC_PTA ?= y
 CFG_ATMEL_RTC ?= y
 CFG_ATMEL_PIOBU ?= y
+
+ifeq ($(PLATFORM_FLAVOR),sama5d27_wlsom1_ek)
+CFG_DRIVERS_GPIO ?= y
+CFG_DRIVERS_I2C ?= y
+CFG_ATMEL_I2C ?= y
+CFG_DRIVERS_PINCTRL ?= y
+CFG_ATMEL_PIO ?= y
+endif
+
+# SCMI related configuration
+CFG_SCMI_PTA ?= y
+
+CFG_SCMI_MSG_DRIVERS ?= y
+ifeq ($(CFG_SCMI_MSG_DRIVERS),y)
+$(call force,CFG_SCMI_MSG_SMT,y)
+$(call force,CFG_SCMI_MSG_CLOCK,y)
+$(call force,CFG_SCMI_MSG_USE_CLK,y)
+$(call force,CFG_SCMI_MSG_SMT_FASTCALL_ENTRY,y)
+endif

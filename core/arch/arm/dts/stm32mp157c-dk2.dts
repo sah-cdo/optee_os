@@ -29,8 +29,18 @@
 	};
 };
 
+&bsec {
+	board_id: board_id@ec {
+		reg = <0xec 0x4>;
+		st,non-secure-otp;
+	};
+	huk_otp: huk-otp@f0 {
+		reg = <0xf0 0x10>;
+	};
+};
+
 &dsi {
-	status = "okay";
+	status = "disabled";
 	phy-dsi-supply = <&reg18>;
 
 	ports {
@@ -78,7 +88,7 @@
 };
 
 &ltdc {
-	status = "okay";
+	status = "disabled";
 
 	port {
 		ltdc_ep1_out: endpoint@1 {
@@ -94,15 +104,4 @@
 	pinctrl-1 = <&usart2_sleep_pins_c>;
 	pinctrl-2 = <&usart2_idle_pins_c>;
 	status = "disabled";
-};
-
-&rcc {
-	status = "okay";
-};
-
-&bsec {
-	board_id: board_id@ec {
-		reg = <0xec 0x4>;
-		st,non-secure-otp;
-	};
 };

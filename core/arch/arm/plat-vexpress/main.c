@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /*
- * Copyright (c) 2016-2020, Linaro Limited
+ * Copyright (c) 2016-2023, Linaro Limited
  * Copyright (c) 2014, STMicroelectronics International N.V.
  */
 
 #include <arm.h>
+#include <config.h>
 #include <console.h>
 #include <drivers/gic.h>
+#include <drivers/hfic.h>
 #include <drivers/pl011.h>
-#include <drivers/tpm2_mmio.h>
-#include <drivers/tpm2_ptp_fifo.h>
 #include <drivers/tzc400.h>
 #include <initcall.h>
 #include <keep.h>
@@ -20,6 +20,7 @@
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
 #include <kernel/tee_time.h>
+#include <kernel/thread_spmc.h>
 #include <mm/core_memprot.h>
 #include <mm/core_mmu.h>
 #include <platform_config.h>
@@ -28,13 +29,9 @@
 #include <string.h>
 #include <trace.h>
 
-static struct gic_data gic_data __nex_bss;
 static struct pl011_data console_data __nex_bss;
 
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, CONSOLE_UART_BASE, PL011_REG_SIZE);
-#if defined(CFG_DRIVERS_TPM2_MMIO)
-register_phys_mem_pgdir(MEM_AREA_IO_SEC, TPM2_BASE, TPM2_REG_SIZE);
-#endif
 #if defined(PLATFORM_FLAVOR_fvp)
 register_phys_mem(MEM_AREA_RAM_SEC, TZCDRAM_BASE, TZCDRAM_SIZE);
 #endif
@@ -48,36 +45,40 @@ register_ddr(DRAM0_BASE, DRAM0_SIZE);
 register_ddr(DRAM1_BASE, DRAM1_SIZE);
 #endif
 
-#ifdef GIC_BASE
-
+#ifdef CFG_GIC
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICC_BASE, GIC_CPU_REG_SIZE);
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICD_BASE, GIC_DIST_REG_SIZE);
-register_phys_mem_pgdir(MEM_AREA_IO_SEC, GICC_BASE, GIC_DIST_REG_SIZE);
+#ifdef GIC_REDIST_BASE
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, GIC_REDIST_BASE, GIC_REDIST_SIZE);
+#endif
 
-void main_init_gic(void)
+void boot_primary_init_intc(void)
 {
-#if defined(CFG_WITH_ARM_TRUSTED_FW)
-	/* On ARMv8, GIC configuration is initialized in ARM-TF */
-	gic_init_base_addr(&gic_data, GIC_BASE + GICC_OFFSET,
-			   GIC_BASE + GICD_OFFSET);
+#ifdef GIC_REDIST_BASE
+	gic_init_v3(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET,
+		    GIC_REDIST_BASE);
 #else
-	gic_init(&gic_data, GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
+	gic_init(GIC_BASE + GICC_OFFSET, GIC_BASE + GICD_OFFSET);
 #endif
-	itr_init(&gic_data.chip);
+	if (IS_ENABLED(CFG_CORE_SEL1_SPMC) &&
+	    IS_ENABLED(CFG_CORE_ASYNC_NOTIF)) {
+		gic_init_donate_sgi_to_ns(GIC_SGI_SEC_BASE);
+		thread_spmc_set_async_notif_intid(GIC_SGI_SEC_BASE);
+	}
 }
 
-#if !defined(CFG_WITH_ARM_TRUSTED_FW)
-void main_secondary_init_gic(void)
+void boot_secondary_init_intc(void)
 {
-	gic_cpu_init(&gic_data);
+	gic_init_per_cpu();
 }
-#endif
+#endif /*CFG_GIC*/
 
-#endif
-
-void itr_core_handler(void)
+#ifdef CFG_CORE_HAFNIUM_INTC
+void boot_primary_init_intc(void)
 {
-	gic_it_handle(&gic_data);
+	hfic_init();
 }
+#endif
 
 void console_init(void)
 {
@@ -86,7 +87,9 @@ void console_init(void)
 	register_serial_console(&console_data.chip);
 }
 
-#if defined(IT_CONSOLE_UART) && !defined(CFG_VIRTUALIZATION) && \
+#if (defined(CFG_GIC) || defined(CFG_CORE_HAFNIUM_INTC)) && \
+	defined(IT_CONSOLE_UART) && \
+	!defined(CFG_NS_VIRTUALIZATION) && \
 	!(defined(CFG_WITH_ARM_TRUSTED_FW) && defined(CFG_ARM_GICV2))
 /*
  * This cannot be enabled with TF-A and GICv3 because TF-A then need to
@@ -101,6 +104,9 @@ static void read_console(void)
 {
 	struct serial_chip *cons = &console_data.chip;
 
+	if (!cons->ops->getchar || !cons->ops->have_rx_data)
+		return;
+
 	while (cons->ops->have_rx_data(cons)) {
 		int ch __maybe_unused = cons->ops->getchar(cons);
 
@@ -108,14 +114,14 @@ static void read_console(void)
 	}
 }
 
-static enum itr_return console_itr_cb(struct itr_handler *h __maybe_unused)
+static enum itr_return console_itr_cb(struct itr_handler *hdl)
 {
 	if (notif_async_is_started()) {
 		/*
 		 * Asynchronous notifications are enabled, lets read from
 		 * uart in the bottom half instead.
 		 */
-		itr_disable(IT_CONSOLE_UART);
+		interrupt_disable(hdl->chip, hdl->it);
 		notif_send_async(NOTIF_VALUE_DO_BOTTOM_HALF);
 	} else {
 		read_console();
@@ -143,11 +149,11 @@ static void yielding_console_notif(struct notif_driver *ndrv __unused,
 	switch (ev) {
 	case NOTIF_EVENT_DO_BOTTOM_HALF:
 		read_console();
-		itr_enable(IT_CONSOLE_UART);
+		interrupt_enable(console_itr.chip, console_itr.it);
 		break;
 	case NOTIF_EVENT_STOPPED:
 		DMSG("Asynchronous notifications stopped");
-		itr_enable(IT_CONSOLE_UART);
+		interrupt_enable(console_itr.chip, console_itr.it);
 		break;
 	default:
 		EMSG("Unknown event %d", (int)ev);
@@ -161,32 +167,21 @@ struct notif_driver console_notif = {
 
 static TEE_Result init_console_itr(void)
 {
-	itr_add(&console_itr);
-	itr_enable(IT_CONSOLE_UART);
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	res = interrupt_add_handler_with_chip(interrupt_get_main_chip(),
+					      &console_itr);
+	if (res)
+		return res;
+
+	interrupt_enable(console_itr.chip, console_itr.it);
+
 	if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF))
 		notif_register_driver(&console_notif);
 	return TEE_SUCCESS;
 }
 driver_init(init_console_itr);
 #endif
-
-#if defined(CFG_DRIVERS_TPM2_MMIO)
-static TEE_Result init_tpm2(void)
-{
-	enum tpm2_result res = TPM2_OK;
-
-	res = tpm2_mmio_init(TPM2_BASE);
-	if (res) {
-		EMSG("Failed to initialize TPM2 MMIO");
-		return TEE_ERROR_GENERIC;
-	}
-
-	DMSG("TPM2 Chip initialized");
-
-	return TEE_SUCCESS;
-}
-driver_init(init_tpm2);
-#endif /* defined(CFG_DRIVERS_TPM2_MMIO) */
 
 #ifdef CFG_TZC400
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, TZC400_BASE, TZC400_REG_SIZE);

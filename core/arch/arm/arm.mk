@@ -80,6 +80,13 @@ ifeq ($(CFG_CORE_WORKAROUND_NSITR_CACHE_PRIME),y)
 $(call force,CFG_CORE_WORKAROUND_SPECTRE_BP,y,Required by CFG_CORE_WORKAROUND_NSITR_CACHE_PRIME)
 endif
 
+# Adds workarounds against if ARM core is configured with Non-maskable FIQ
+# (NMFI) support. This is indicated by SCTLR.NMFI being true. NMFI cannot be
+# disabled by software and as it affects atomic context end result will be
+# prohibiting FIQ signal usage in OP-TEE and applying some tweaks to make sure
+# FIQ is enabled in critical places.
+CFG_CORE_WORKAROUND_ARM_NMFI ?= n
+
 CFG_CORE_RWDATA_NOEXEC ?= y
 CFG_CORE_RODATA_NOEXEC ?= n
 ifeq ($(CFG_CORE_RODATA_NOEXEC),y)
@@ -105,6 +112,10 @@ ifeq ($(CFG_CORE_SEL2_SPMC),y)
 $(call force,CFG_CORE_FFA,y)
 $(call force,CFG_CORE_SEL1_SPMC,n)
 $(call force,CFG_CORE_EL3_SPMC,n)
+CFG_CORE_HAFNIUM_INTC ?= y
+# Enable support in OP-TEE to relocate itself to allow it to run from a
+# physical address that differs from the link address
+CFG_CORE_PHYS_RELOCATABLE ?= y
 endif
 # SPMC configuration "EL3 SPMC" where SPM Core is implemented at EL3, that
 # is, in TF-A
@@ -113,6 +124,49 @@ $(call force,CFG_CORE_FFA,y)
 $(call force,CFG_CORE_SEL2_SPMC,n)
 $(call force,CFG_CORE_SEL1_SPMC,n)
 endif
+
+ifeq ($(CFG_CORE_FFA),y)
+ifneq ($(CFG_DT),y)
+$(error CFG_CORE_FFA depends on CFG_DT)
+endif
+ifneq ($(CFG_ARM64_core),y)
+$(error CFG_CORE_FFA depends on CFG_ARM64_core)
+endif
+endif
+
+ifeq ($(CFG_CORE_PHYS_RELOCATABLE)-$(CFG_WITH_PAGER),y-y)
+$(error CFG_CORE_PHYS_RELOCATABLE and CFG_WITH_PAGER are not compatible)
+endif
+ifeq ($(CFG_CORE_PHYS_RELOCATABLE),y)
+ifneq ($(CFG_CORE_SEL2_SPMC),y)
+$(error CFG_CORE_PHYS_RELOCATABLE depends on CFG_CORE_SEL2_SPMC)
+endif
+endif
+
+ifeq ($(CFG_CORE_FFA)-$(CFG_WITH_PAGER),y-y)
+$(error CFG_CORE_FFA and CFG_WITH_PAGER are not compatible)
+endif
+ifeq ($(CFG_GIC),y)
+ifeq ($(CFG_ARM_GICV3),y)
+$(call force,CFG_CORE_IRQ_IS_NATIVE_INTR,y)
+else
+$(call force,CFG_CORE_IRQ_IS_NATIVE_INTR,n)
+endif
+endif
+
+CFG_CORE_HAFNIUM_INTC ?= n
+ifeq ($(CFG_CORE_HAFNIUM_INTC),y)
+$(call force,CFG_CORE_IRQ_IS_NATIVE_INTR,y)
+endif
+
+# Selects if IRQ is used to signal native interrupt
+# if CFG_CORE_IRQ_IS_NATIVE_INTR == y:
+#   IRQ signals a native interrupt pending
+#   FIQ signals a foreign non-secure interrupt or a managed exit pending
+# else: (vice versa)
+#   IRQ signals a foreign non-secure interrupt or a managed exit pending
+#   FIQ signals a native interrupt pending
+CFG_CORE_IRQ_IS_NATIVE_INTR ?= n
 
 # Unmaps all kernel mode code except the code needed to take exceptions
 # from user space and restore kernel mode mapping again. This gives more
@@ -128,7 +182,8 @@ CFG_SM_NO_CYCLE_COUNTING ?= y
 # CFG_CORE_ASYNC_NOTIF_GIC_INTID is defined by the platform to some free
 # interrupt. Setting it to a non-zero number enables support for using an
 # Arm-GIC to notify normal world. This config variable should use a value
-# larger the 32 to make it of the type SPI.
+# larger or equal to 24 to make it of the type SPI or PPI (secure PPI
+# only).
 # Note that asynchronous notifactions must be enabled with
 # CFG_CORE_ASYNC_NOTIF=y for this variable to be used.
 CFG_CORE_ASYNC_NOTIF_GIC_INTID ?= 0
@@ -196,7 +251,7 @@ core-platform-cflags += $(platform-cflags-debug-info)
 core-platform-aflags += $(platform-aflags-generic)
 core-platform-aflags += $(platform-aflags-debug-info)
 
-ifeq ($(CFG_CORE_ASLR),y)
+ifeq ($(call cfg-one-enabled, CFG_CORE_ASLR CFG_CORE_PHYS_RELOCATABLE),y)
 core-platform-cflags += -fpie
 endif
 

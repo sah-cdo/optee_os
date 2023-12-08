@@ -5,11 +5,12 @@
  */
 
 #include <drivers/rstctrl.h>
+#include <drivers/stm32mp_dt_bindings.h>
 #include <drivers/stm32mp1_rcc.h>
-#include <dt-bindings/reset/stm32mp1-resets.h>
 #include <io.h>
 #include <kernel/delay.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
 #include <kernel/panic.h>
 #include <mm/core_memprot.h>
 #include <stm32_util.h>
@@ -59,6 +60,7 @@ static TEE_Result reset_assert(struct rstctrl *rstctrl, unsigned int to_us)
 	uint32_t bit_mask = 0;
 	size_t offset = 0;
 
+#ifdef CFG_STM32MP15
 	switch (id) {
 	case MCU_HOLD_BOOT_R:
 		/*
@@ -75,6 +77,7 @@ static TEE_Result reset_assert(struct rstctrl *rstctrl, unsigned int to_us)
 	default:
 		break;
 	}
+#endif
 
 	offset = reset_id2reg_offset(id);
 	bit_mask = BIT(reset_id2reg_bit_pos(id));
@@ -102,6 +105,7 @@ static TEE_Result reset_deassert(struct rstctrl *rstctrl, unsigned int to_us)
 	uint32_t bit_mask = 0;
 	size_t offset = 0;
 
+#ifdef CFG_STM32MP15
 	switch (id) {
 	case MCU_HOLD_BOOT_R:
 		/*
@@ -117,6 +121,7 @@ static TEE_Result reset_deassert(struct rstctrl *rstctrl, unsigned int to_us)
 	default:
 		break;
 	}
+#endif
 
 	offset = reset_id2reg_offset(id) + RCC_MP_RSTCLRR_OFFSET;
 	bit_mask = BIT(reset_id2reg_bit_pos(id));
@@ -178,28 +183,25 @@ struct rstctrl *stm32mp_rcc_reset_id_to_rstctrl(unsigned int binding_id)
 	return &rstline->rstctrl;
 }
 
-#ifdef CFG_EMBED_DTB
-static struct rstctrl *stm32_rstctrl_get_dev(struct dt_driver_phandle_args *arg,
-					     void *priv_data __unused,
-					     TEE_Result *res)
+static TEE_Result stm32_rstctrl_get_dev(struct dt_pargs *arg,
+					void *priv_data __unused,
+					struct rstctrl **out_device)
 {
 	struct stm32_rstline *stm32_rstline = NULL;
 	uintptr_t control_id = 0;
 
-	if (arg->args_count != 1) {
-		*res = TEE_ERROR_BAD_PARAMETERS;
-		return NULL;
-	}
+	if (arg->args_count != 1)
+		return TEE_ERROR_BAD_PARAMETERS;
+
 	control_id = arg->args[0];
 
 	stm32_rstline = find_or_allocate_rstline(control_id);
-	if (!stm32_rstline) {
-		*res = TEE_ERROR_OUT_OF_MEMORY;
-		return NULL;
-	}
+	if (!stm32_rstline)
+		return TEE_ERROR_OUT_OF_MEMORY;
 
-	*res = TEE_SUCCESS;
-	return &stm32_rstline->rstctrl;
+	*out_device = &stm32_rstline->rstctrl;
+
+	return TEE_SUCCESS;
 }
 
 static TEE_Result stm32_rstctrl_provider_probe(const void *fdt, int offs,
@@ -209,7 +211,7 @@ static TEE_Result stm32_rstctrl_provider_probe(const void *fdt, int offs,
 
 	assert(rstctrl_ops_is_valid(&stm32_rstctrl_ops));
 
-	_fdt_fill_device_info(fdt, &info, offs);
+	fdt_fill_device_info(fdt, &info, offs);
 
 	assert(info.reg == RCC_BASE &&
 	       info.reg_size != DT_INFO_INVALID_REG_SIZE);
@@ -221,6 +223,7 @@ static TEE_Result stm32_rstctrl_provider_probe(const void *fdt, int offs,
 static const struct dt_device_match stm32_rstctrl_match_table[] = {
 	{ .compatible = "st,stm32mp1-rcc" },
 	{ .compatible = "st,stm32mp1-rcc-secure" },
+	{ .compatible = "st,stm32mp13-rcc" },
 	{ }
 };
 
@@ -230,4 +233,3 @@ DEFINE_DT_DRIVER(stm32_rstctrl_dt_driver) = {
 	.match_table = stm32_rstctrl_match_table,
 	.probe = stm32_rstctrl_provider_probe,
 };
-#endif /*CFG_EMBED_DTB*/

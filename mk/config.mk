@@ -103,12 +103,6 @@ CFG_CORE_DUMP_OOM ?= $(CFG_TEE_CORE_MALLOC_DEBUG)
 # Levels: 0=none 1=error 2=info 3=debug 4=flow
 CFG_MSG_LONG_PREFIX_MASK ?= 0x1a
 
-# PRNG configuration
-# If CFG_WITH_SOFTWARE_PRNG is enabled, crypto provider provided
-# software PRNG implementation is used.
-# Otherwise, you need to implement hw_get_random_bytes() for your platform
-CFG_WITH_SOFTWARE_PRNG ?= y
-
 # Number of threads
 CFG_NUM_THREADS ?= 2
 
@@ -126,8 +120,8 @@ CFG_OS_REV_REPORTS_GIT_SHA1 ?= y
 # we might be outside of a Git environment, or the tree may have been cloned
 # with limited depth not including any tag, so there is really no guarantee
 # that TEE_IMPL_VERSION contains the major and minor revision numbers.
-CFG_OPTEE_REVISION_MAJOR ?= 3
-CFG_OPTEE_REVISION_MINOR ?= 19
+CFG_OPTEE_REVISION_MAJOR ?= 4
+CFG_OPTEE_REVISION_MINOR ?= 0
 CFG_OPTEE_REVISION_EXTRA ?=
 
 # Trusted OS implementation version
@@ -228,6 +222,16 @@ _CFG_WITH_SECURE_STORAGE := $(call cfg-one-enabled,CFG_REE_FS CFG_RPMB_FS)
 TA_SIGN_KEY ?= keys/default_ta.pem
 TA_PUBLIC_KEY ?= $(TA_SIGN_KEY)
 
+# Subkeys is a complement to the normal TA_SIGN_KEY where a subkey is used
+# to verify a TA instead. To sign a TA using a previously prepared subkey
+# two new options are added, TA_SUBKEY_ARGS and TA_SUBKEY_DEPS.  It is
+# typically used by assigning the following in the TA Makefile:
+# BINARY = <TA-uuid-string>
+# TA_SIGN_KEY = subkey.pem
+# TA_SUBKEY_ARGS = --subkey subkey.bin --name subkey_ta
+# TA_SUBKEY_DEPS = subkey.bin
+# See the documentation for more details on subkeys.
+
 # Include lib/libutils/isoc in the build? Most platforms need this, but some
 # may not because they obtain the isoc functions from elsewhere
 CFG_LIBUTILS_WITH_ISOC ?= y
@@ -260,6 +264,9 @@ endif
 
 # Enable support for dynamically loaded user TAs
 CFG_WITH_USER_TA ?= y
+
+# Build user TAs included in this source tree
+CFG_BUILD_IN_TREE_TA ?= y
 
 # Choosing the architecture(s) of user-mode libraries (used by TAs)
 #
@@ -303,6 +310,37 @@ CFG_TA_ASLR_MAX_OFFSET_PAGES ?= 128
 # corruption vulnerabilities more difficult.
 CFG_CORE_ASLR ?= y
 
+# Stack Protection for TEE Core
+# This flag enables the compiler stack protection mechanisms -fstack-protector.
+# It will check the stack canary value before returning from a function to
+# prevent buffer overflow attacks. Stack protector canary logic will be added
+# for vulnerable functions that contain:
+# - A character array larger than 8 bytes.
+# - An 8-bit integer array larger than 8 bytes.
+# - A call to alloca() with either a variable size or a constant size bigger
+#   than 8 bytes.
+CFG_CORE_STACK_PROTECTOR ?= n
+# This enable stack protector flag -fstack-protector-strong. Stack protector
+# canary logic will be added for vulnerable functions that contain:
+# - An array of any size and type.
+# - A call to alloca().
+# - A local variable that has its address taken.
+CFG_CORE_STACK_PROTECTOR_STRONG ?= y
+# This enable stack protector flag -fstack-protector-all. Stack protector canary
+# logic will be added to all functions regardless of their vulnerability.
+CFG_CORE_STACK_PROTECTOR_ALL ?= n
+# Stack Protection for TA
+CFG_TA_STACK_PROTECTOR ?= n
+CFG_TA_STACK_PROTECTOR_STRONG ?= y
+CFG_TA_STACK_PROTECTOR_ALL ?= n
+
+_CFG_CORE_STACK_PROTECTOR := $(call cfg-one-enabled, CFG_CORE_STACK_PROTECTOR \
+						     CFG_CORE_STACK_PROTECTOR_STRONG \
+						     CFG_CORE_STACK_PROTECTOR_ALL)
+_CFG_TA_STACK_PROTECTOR := $(call cfg-one-enabled, CFG_TA_STACK_PROTECTOR \
+						   CFG_TA_STACK_PROTECTOR_STRONG \
+						   CFG_TA_STACK_PROTECTOR_ALL)
+
 # Load user TAs from the REE filesystem via tee-supplicant
 CFG_REE_FS_TA ?= y
 
@@ -316,12 +354,14 @@ CFG_REE_FS_TA ?= y
 CFG_REE_FS_TA_BUFFERED ?= n
 $(eval $(call cfg-depends-all,CFG_REE_FS_TA_BUFFERED,CFG_REE_FS_TA))
 
-# When CFG_REE_FS=y and CFG_RPMB_FS=y:
+# When CFG_REE_FS=y:
 # Allow secure storage in the REE FS to be entirely deleted without causing
 # anti-rollback errors. That is, rm /data/tee/dirf.db or rm -rf /data/tee (or
 # whatever path is configured in tee-supplicant as CFG_TEE_FS_PARENT_PATH)
 # can be used to reset the secure storage to a clean, empty state.
-# Typically used for testing only since it weakens storage security.
+# Intended to be used for testing only since it weakens storage security.
+# Warning: If enabled for release build then it will break rollback protection
+# of TAs and the entire REE FS secure storage.
 CFG_REE_FS_ALLOW_RESET ?= n
 
 # Support for loading user TAs from a special section in the TEE binary.
@@ -406,6 +446,10 @@ CFG_CORE_SANITIZE_UNDEFINED ?= n
 # default
 CFG_CORE_SANITIZE_KADDRESS ?= n
 
+ifeq (y-y,$(CFG_CORE_SANITIZE_KADDRESS)-$(CFG_CORE_ASLR))
+$(error CFG_CORE_SANITIZE_KADDRESS and CFG_CORE_ASLR are not compatible)
+endif
+
 # Add stack guards before/after stacks and periodically check them
 CFG_WITH_STACK_CANARIES ?= y
 
@@ -441,7 +485,8 @@ CFG_STACK_TMP_EXTRA ?= 0
 ifneq ($(strip $(CFG_EMBED_DTB_SOURCE_FILE)),)
 CFG_EMBED_DTB ?= y
 endif
-ifeq ($(CFG_EMBED_DTB),y)
+ifeq ($(filter y,$(CFG_EMBED_DTB) $(CFG_CORE_SEL1_SPMC) $(CFG_CORE_SEL2_SPMC) \
+		 $(CFG_CORE_EL3_SPMC)),y)
 $(call force,CFG_DT,y)
 endif
 CFG_EMBED_DTB ?= n
@@ -450,6 +495,19 @@ CFG_EXTERNAL_DT ?= $(CFG_DT)
 CFG_MAP_EXT_DT_SECURE ?= n
 ifeq ($(CFG_MAP_EXT_DT_SECURE),y)
 $(call force,CFG_DT,y)
+endif
+
+# This option enables OP-TEE to support boot arguments handover via Transfer
+# List defined in Firmware Handoff specification.
+# Note: This is an experimental feature and incompatible ABI changes can be
+# expected. It should be off by default until Firmware Handoff specification
+# has a stable release.
+# This feature requires the support of Device Tree.
+CFG_TRANSFER_LIST ?= n
+ifeq ($(CFG_TRANSFER_LIST),y)
+$(call force,CFG_DT,y)
+$(call force,CFG_EXTERNAL_DT,y)
+$(call force,CFG_MAP_EXT_DT_SECURE,y)
 endif
 
 # Maximum size of the Device Tree Blob, has to be large enough to allow
@@ -487,17 +545,22 @@ CFG_TEE_CORE_EMBED_INTERNAL_TESTS ?= $(CFG_ENABLE_EMBEDDED_TESTS)
 # Compiles bget_main_test() to be called from a test TA
 CFG_TA_BGET_TEST ?= $(CFG_ENABLE_EMBEDDED_TESTS)
 
-# CFG_DT_DRIVER_EMBEDDED_TEST when enabled embedb DT driver probing tests.
-# This also requires embeddeding a DTB with expected content.
-# Defautl disable CFG_DRIVERS_CLK_EARLY_PROBE to probe clocks as other drivers.
+# CFG_DT_DRIVER_EMBEDDED_TEST when enabled embedded DT driver probing tests.
+# This also requires embedding a DTB with expected content.
+# Default disable CFG_DRIVERS_CLK_EARLY_PROBE to probe clocks as other drivers.
 # A probe deferral test mandates CFG_DRIVERS_DT_RECURSIVE_PROBE=n.
 CFG_DT_DRIVER_EMBEDDED_TEST ?= n
 ifeq ($(CFG_DT_DRIVER_EMBEDDED_TEST),y)
 CFG_DRIVERS_CLK ?= y
+CFG_DRIVERS_GPIO ?= y
 CFG_DRIVERS_RSTCTRL ?= y
 CFG_DRIVERS_CLK_EARLY_PROBE ?= n
 $(call force,CFG_DRIVERS_DT_RECURSIVE_PROBE,n,Mandated by CFG_DT_DRIVER_EMBEDDED_TEST)
 endif
+
+# CFG_WITH_STATS when enabled embeds PTA statistics service to allow non-secure
+# clients to retrieve debug and statistics information on core and loaded TAs.
+CFG_WITH_STATS ?= n
 
 # CFG_DRIVERS_DT_RECURSIVE_PROBE when enabled forces a recursive subnode
 # parsing in the embedded DTB for driver probing. The alternative is
@@ -512,7 +575,7 @@ CFG_BOOT_SECONDARY_REQUEST ?= n
 # Default heap size for Core, 64 kB
 CFG_CORE_HEAP_SIZE ?= 65536
 
-# Default size of nexus heap. 16 kB. Used only if CFG_VIRTUALIZATION
+# Default size of nexus heap. 16 kB. Used only if CFG_NS_VIRTUALIZATION
 # is enabled
 CFG_CORE_NEX_HEAP_SIZE ?= 16384
 
@@ -531,25 +594,9 @@ CFG_TA_GPROF_SUPPORT ?= n
 # TA function tracing.
 # When this option is enabled, OP-TEE can execute Trusted Applications
 # instrumented with GCC's -pg flag and will output function tracing
-# information in ftrace.out format to /tmp/ftrace-<ta_uuid>.out (path is
-# defined in tee-supplicant)
+# information for all functions compiled with -pg to
+# /tmp/ftrace-<ta_uuid>.out (path is defined in tee-supplicant).
 CFG_FTRACE_SUPPORT ?= n
-
-# How to make room when the function tracing buffer is full?
-# 'shift': shift the previously stored data by the amount needed in order
-#    to always keep the latest logs (slower, especially with big buffer sizes)
-# 'wrap': discard the previous data and start at the beginning of the buffer
-#    again (fast, but can result in a mostly empty buffer)
-# 'stop': stop logging new data
-CFG_FTRACE_BUF_WHEN_FULL ?= shift
-$(call cfg-check-value,FTRACE_BUF_WHEN_FULL,shift stop wrap)
-$(call force,_CFG_FTRACE_BUF_WHEN_FULL_$(CFG_FTRACE_BUF_WHEN_FULL),y)
-
-# Function tracing: unit to be used when displaying durations
-#  0: always display durations in microseconds
-# >0: if duration is greater or equal to the specified value (in microseconds),
-#     display it in milliseconds
-CFG_FTRACE_US_MS ?= 10000
 
 # Core syscall function tracing.
 # When this option is enabled, OP-TEE core is instrumented with GCC's
@@ -687,11 +734,23 @@ CFG_CRYPTOLIB_DIR ?= core/lib/libtomcrypt
 # that would set = n.
 $(call force,CFG_CORE_MBEDTLS_MPI,y)
 
-# Enable virtualization support. OP-TEE will not work without compatible
-# hypervisor if this option is enabled.
-CFG_VIRTUALIZATION ?= n
+# When enabled, CFG_NS_VIRTUALIZATION embeds support for virtualization in
+# the non-secure world. OP-TEE will not work without a compatible hypervisor
+# in the non-secure world if this option is enabled.
+#
+# CFG_VIRTUALIZATION served the same purpose as CFG_NS_VIRTUALIZATION but is
+# deprecated as the configuration switch name was ambiguous regarding which
+# world has virtualization enabled.
+ifneq (undefined,$(flavor CFG_VIRTUALIZATION))
+$(info WARNING: CFG_VIRTUALIZATION is deprecated, use CFG_NS_VIRTUALIZATION instead)
+CFG_NS_VIRTUALIZATION ?= $(CFG_VIRTUALIZATION)
+ifneq ($(CFG_NS_VIRTUALIZATION),$(CFG_VIRTUALIZATION))
+$(error Inconsistent CFG_NS_VIRTUALIZATION=$(CFG_NS_VIRTUALIZATION) and CFG_VIRTUALIZATION=$(CFG_VIRTUALIZATION))
+endif
+endif # CFG_VIRTUALIZATION defined
+CFG_NS_VIRTUALIZATION ?= n
 
-ifeq ($(CFG_VIRTUALIZATION),y)
+ifeq ($(CFG_NS_VIRTUALIZATION),y)
 $(call force,CFG_CORE_RODATA_NOEXEC,y)
 $(call force,CFG_CORE_RWDATA_NOEXEC,y)
 
@@ -740,10 +799,47 @@ CFG_SCMI_MSG_VOLTAGE_DOMAIN ?= n
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_FASTCALL_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-one,CFG_SCMI_MSG_SMT_THREAD_ENTRY,CFG_SCMI_MSG_SMT CFG_SCMI_MSG_SHM_MSG))
+ifeq ($(CFG_SCMI_MSG_SMT),y)
+_CFG_SCMI_PTA_SMT_HEADER := y
 endif
+ifeq ($(CFG_SCMI_MSG_SHM_MSG),y)
+_CFG_SCMI_PTA_MSG_HEADER := y
+endif
+endif
+
+# CFG_SCMI_SCPFW, when enabled, embeds the reference SCMI server implementation
+# from SCP-firmware package as an built-in SCMI stack in core. This
+# configuration mandates target product identifier is configured with
+# CFG_SCMI_SCPFW_PRODUCT and the SCP-firmware source tree path with
+# CFG_SCP_FIRMWARE.
+CFG_SCMI_SCPFW ?= n
+
+ifeq ($(CFG_SCMI_SCPFW),y)
+$(call force,CFG_SCMI_PTA,y,Required by CFG_SCMI_SCPFW)
+ifeq (,$(CFG_SCMI_SCPFW_PRODUCT))
+$(error CFG_SCMI_SCPFW=y requires CFG_SCMI_SCPFW_PRODUCT configuration)
+endif
+ifeq (,$(wildcard $(CFG_SCP_FIRMWARE)/CMakeLists.txt))
+$(error CFG_SCMI_SCPFW=y requires CFG_SCP_FIRMWARE configuration)
+endif
+endif #CFG_SCMI_SCPFW
+
+ifeq ($(CFG_SCMI_MSG_DRIVERS)-$(CFG_SCMI_SCPFW),y-y)
+$(error CFG_SCMI_MSG_DRIVERS=y and CFG_SCMI_SCPFW=y are mutually exclusive)
+endif
+
+# When enabled, CFG_SCMI_MSG_USE_CLK embeds SCMI clocks registering services for
+# the platform SCMI server and implements the platform plat_scmi_clock_*()
+# functions.
+CFG_SCMI_MSG_USE_CLK ?= n
+$(eval $(call cfg-depends-all,CFG_SCMI_MSG_USE_CLK,CFG_DRIVERS_CLK CFG_SCMI_MSG_DRIVERS))
 
 # Enable SCMI PTA interface for REE SCMI agents
 CFG_SCMI_PTA ?= n
+ifeq ($(CFG_SCMI_PTA),y)
+_CFG_SCMI_PTA_SMT_HEADER ?= n
+_CFG_SCMI_PTA_MSG_HEADER ?= n
+endif
 
 ifneq ($(CFG_STMM_PATH),)
 $(call force,CFG_WITH_STMM_SP,y)
@@ -793,10 +889,13 @@ CFG_PREALLOC_RPC_CACHE ?= y
 # CFG_DRIVERS_CLK_DT embeds devicetree clock parsing support
 # CFG_DRIVERS_CLK_FIXED add support for "fixed-clock" compatible clocks
 # CFG_DRIVERS_CLK_EARLY_PROBE makes clocks probed at early_init initcall level.
+# CFG_DRIVERS_CLK_PRINT_TREE embeds a helper function to print the clock tree
+# state on OP-TEE core console with the debug trace level.
 CFG_DRIVERS_CLK ?= n
 CFG_DRIVERS_CLK_DT ?= $(call cfg-all-enabled,CFG_DRIVERS_CLK CFG_DT)
 CFG_DRIVERS_CLK_FIXED ?= $(CFG_DRIVERS_CLK_DT)
 CFG_DRIVERS_CLK_EARLY_PROBE ?= $(CFG_DRIVERS_CLK_DT)
+CFG_DRIVERS_CLK_PRINT_TREE ?= n
 
 $(eval $(call cfg-depends-all,CFG_DRIVERS_CLK_DT,CFG_DRIVERS_CLK CFG_DT))
 $(eval $(call cfg-depends-all,CFG_DRIVERS_CLK_FIXED,CFG_DRIVERS_CLK_DT))
@@ -805,15 +904,60 @@ $(eval $(call cfg-depends-all,CFG_DRIVERS_CLK_FIXED,CFG_DRIVERS_CLK_DT))
 # OP-TEE core to provide reset controls on subsystems of the devices.
 CFG_DRIVERS_RSTCTRL ?= n
 
-# The purpose of this flag is to show a print when booting up the device that
-# indicates whether the board runs a standard developer configuration or not.
-# A developer configuration doesn't necessarily has to be secure. The intention
+# When enabled, CFG_DRIVERS_GPIO embeds a GPIO controller framework in
+# OP-TEE core to provide GPIO support for drivers.
+CFG_DRIVERS_GPIO ?= n
+
+# When enabled, CFG_DRIVERS_I2C provides I2C controller and devices support.
+CFG_DRIVERS_I2C ?= n
+
+# When enabled, CFG_DRIVERS_PINCTRL embeds a pin muxing controller framework in
+# OP-TEE core to provide drivers a way to apply pin muxing configurations based
+# on device-tree.
+CFG_DRIVERS_PINCTRL ?= n
+
+# When enabled, CFG_DRIVERS_REGULATOR embeds a voltage regulator framework in
+# OP-TEE core to provide drivers a common regulator interface and describe
+# the regulators dependencies using an embedded device tree.
+#
+# When enabled, CFG_REGULATOR_FIXED embeds a voltage regulator driver for
+# DT compatible "regulator-fixed" devices.
+#
+# When enabled, CFG_REGULATOR_GPIO embeds a voltage regulator driver for
+# DT compatible "regulator-gpio" devices.
+#
+# CFG_DRIVERS_REGULATOR_PRINT_TREE embeds a helper function to print the
+# regulator tree state on OP-TEE core console with the info trace level.
+CFG_DRIVERS_REGULATOR ?= n
+CFG_DRIVERS_REGULATOR_PRINT_TREE ?= n
+CFG_REGULATOR_FIXED ?= n
+CFG_REGULATOR_GPIO ?= n
+
+$(eval $(call cfg-enable-all-depends,CFG_REGULATOR_FIXED, \
+	 CFG_DRIVERS_REGULATOR CFG_DT))
+$(eval $(call cfg-enable-all-depends,CFG_REGULATOR_GPIO, \
+	 CFG_DRIVERS_REGULATOR CFG_DT CFG_DRIVERS_GPIO))
+
+# When enabled, CFG_INSECURE permits insecure configuration of OP-TEE core
+# and shows a print (info level) when booting up the device that
+# indicates that the board runs a standard developer configuration.
+#
+# A developer configuration doesn't necessarily have to be secure. The intention
 # is that the one making products based on OP-TEE should override this flag in
 # plat-xxx/conf.mk for the platform they're basing their products on after
 # they've finalized implementing stubbed functionality (see OP-TEE
 # documentation/Porting guidelines) as well as vendor specific security
 # configuration.
-CFG_WARN_INSECURE ?= y
+#
+# CFG_WARN_INSECURE served the same purpose as CFG_INSECURE but is deprecated.
+ifneq (undefined,$(flavor CFG_WARN_INSECURE))
+$(info WARNING: CFG_WARN_INSECURE is deprecated, use CFG_INSECURE instead)
+CFG_INSECURE ?= $(CFG_WARN_INSECURE)
+ifneq ($(CFG_INSECURE),$(CFG_WARN_INSECURE))
+$(error Inconsistent CFG_INSECURE=$(CFG_INSECURE) and CFG_WARN_INSECURE=$(CFG_WARN_INSECURE))
+endif
+endif # CFG_WARN_INSECURE defined
+CFG_INSECURE ?= y
 
 # Enables warnings for declarations mixed with statements
 CFG_WARN_DECL_AFTER_STATEMENT ?= y
@@ -833,8 +977,8 @@ CFG_TA_BTI ?= $(CFG_CORE_BTI)
 
 $(eval $(call cfg-depends-all,CFG_TA_BTI,CFG_ARM64_core))
 
-ifeq (y-y,$(CFG_VIRTUALIZATION)-$(call cfg-one-enabled, CFG_TA_BTI CFG_CORE_BTI))
-$(error CFG_VIRTUALIZATION and BTI are currently incompatible)
+ifeq (y-y,$(CFG_NS_VIRTUALIZATION)-$(call cfg-one-enabled, CFG_TA_BTI CFG_CORE_BTI))
+$(error CFG_NS_VIRTUALIZATION and BTI are currently incompatible)
 endif
 
 ifeq (y-y,$(CFG_PAGED_USER_TA)-$(CFG_TA_BTI))
@@ -854,11 +998,26 @@ ifeq (y-y,$(CFG_WITH_PAGER)-$(CFG_MEMTAG))
 $(error CFG_WITH_PAGER and CFG_MEMTAG are not compatible)
 endif
 
-# CFG_CORE_ASYNC_NOTIF is defined by the platform to enable enables support
-# for sending asynchronous notifications to normal world. Note that an
-# interrupt ID must be configurged by the platform too. Currently is only
+# Privileged Access Never (PAN, part of the ARMv8.1 Extensions) can be
+# used to restrict accesses to unprivileged memory from privileged mode.
+# For RISC-V architecture, CSR {m|s}status.SUM bit is used to implement PAN.
+CFG_PAN ?= n
+
+$(eval $(call cfg-depends-one,CFG_PAN,CFG_ARM64_core CFG_RV64_core CFG_RV32_core))
+
+ifeq ($(filter y, $(CFG_CORE_SEL1_SPMC) $(CFG_CORE_SEL2_SPMC) \
+		  $(CFG_CORE_EL3_SPMC)),y)
+# FF-A case, handled via the FF-A ABI
+CFG_CORE_ASYNC_NOTIF ?= y
+$(call force,_CFG_CORE_ASYNC_NOTIF_DEFAULT_IMPL,n)
+else
+# CFG_CORE_ASYNC_NOTIF is defined by the platform to enable support
+# for sending asynchronous notifications to normal world.
+# Interrupt ID must be configurged by the platform too. Currently is only
 # CFG_CORE_ASYNC_NOTIF_GIC_INTID defined.
 CFG_CORE_ASYNC_NOTIF ?= n
+$(call force,_CFG_CORE_ASYNC_NOTIF_DEFAULT_IMPL,$(CFG_CORE_ASYNC_NOTIF))
+endif
 
 $(eval $(call cfg-enable-all-depends,CFG_MEMPOOL_REPORT_LAST_OFFSET, \
 	 CFG_WITH_STATS))
@@ -881,11 +1040,11 @@ CFG_TA_PAUTH ?= $(CFG_CORE_PAUTH)
 $(eval $(call cfg-depends-all,CFG_CORE_PAUTH,CFG_ARM64_core))
 $(eval $(call cfg-depends-all,CFG_TA_PAUTH,CFG_ARM64_core))
 
-ifeq (y-y,$(CFG_VIRTUALIZATION)-$(CFG_CORE_PAUTH))
-$(error CFG_VIRTUALIZATION and CFG_CORE_PAUTH are currently incompatible)
+ifeq (y-y,$(CFG_NS_VIRTUALIZATION)-$(CFG_CORE_PAUTH))
+$(error CFG_NS_VIRTUALIZATION and CFG_CORE_PAUTH are currently incompatible)
 endif
-ifeq (y-y,$(CFG_VIRTUALIZATION)-$(CFG_TA_PAUTH))
-$(error CFG_VIRTUALIZATION and CFG_TA_PAUTH are currently incompatible)
+ifeq (y-y,$(CFG_NS_VIRTUALIZATION)-$(CFG_TA_PAUTH))
+$(error CFG_NS_VIRTUALIZATION and CFG_TA_PAUTH are currently incompatible)
 endif
 
 ifeq (y-y,$(CFG_TA_GPROF_SUPPORT)-$(CFG_TA_PAUTH))
@@ -901,13 +1060,15 @@ endif
 CFG_WDT ?= n
 
 # Enable watchdog SMC handling compatible with arm-smc-wdt Linux driver
-# When enabled, CFG_WDT_SM_HANDLER_ID must be defined with a SMC ID
 CFG_WDT_SM_HANDLER ?= n
 
 $(eval $(call cfg-enable-all-depends,CFG_WDT_SM_HANDLER,CFG_WDT))
-ifeq (y-,$(CFG_WDT_SM_HANDLER)-$(CFG_WDT_SM_HANDLER_ID))
-$(error CFG_WDT_SM_HANDLER_ID must be defined when enabling CFG_WDT_SM_HANDLER)
-endif
+
+# When CFG_WDT_SM_HANDLER=y, SMC function ID 0x82003D06 default implements
+# arm-smc-wdt service. Platform can also override this ID with a platform
+# specific SMC function ID to access arm-smc-wdt service thanks to
+# optional config switch CFG_WDT_SM_HANDLER_ID.
+CFG_WDT_SM_HANDLER_ID ?= 0x82003D06
 
 # Allow using the udelay/mdelay function for platforms without ARM generic timer
 # extension. When set to 'n', the plat_get_freq() function must be defined by
@@ -920,13 +1081,6 @@ CFG_DRIVERS_RTC ?= n
 # Enable PTA for RTC access from non-secure world
 CFG_RTC_PTA ?= n
 
-# Enable TPM2
-CFG_DRIVERS_TPM2 ?= n
-CFG_DRIVERS_TPM2_MMIO ?= n
-ifeq ($(CFG_CORE_TPM_EVENT_LOG),y)
-CFG_CORE_TCG_PROVIDER ?= $(CFG_DRIVERS_TPM2)
-endif
-
 # Enable the FF-A SPMC tests in xtests
 CFG_SPMC_TESTS ?= n
 
@@ -936,3 +1090,45 @@ CFG_CORE_PREALLOC_EL0_TBLS ?= n
 ifeq (y-y,$(CFG_CORE_PREALLOC_EL0_TBLS)-$(CFG_WITH_PAGER))
 $(error "CFG_WITH_PAGER can't support CFG_CORE_PREALLOC_EL0_TBLS")
 endif
+
+# User TA runtime context dump.
+# When this option is enabled, OP-TEE provides a debug method for
+# developer to dump user TA's runtime context, including TA's heap stats.
+# Developer can open a stats PTA session and then invoke command
+# STATS_CMD_TA_STATS to get the context of loaded TAs.
+CFG_TA_STATS ?= n
+
+# Enables best effort mitigations against fault injected when the hardware
+# is tampered with. Details in lib/libutils/ext/include/fault_mitigation.h
+CFG_FAULT_MITIGATION ?= y
+
+# Enables TEE Internal Core API v1.1 compatibility for in-tree TAs. Note
+# that this doesn't affect libutee itself, it's only the TAs compiled with
+# this set that are affected. Each out-of-tree must set this if to enable
+# compatibility with version v1.1 as the value of this variable is not
+# preserved in the TA dev-kit.
+CFG_TA_OPTEE_CORE_API_COMPAT_1_1 ?= n
+
+# Change supported HMAC key size range, from 64 to 1024.
+# This is needed to pass AOSP Keymaster VTS tests:
+#   Link to tests : https://android.googlesource.com/platform/hardware/interfaces/+/master/keymaster/3.0/vts/functional/keymaster_hidl_hal_test.cpp
+#   Module: VtsHalKeymasterV3_0TargetTest
+#   Testcases: - PerInstance/SigningOperationsTest#
+#              - PerInstance/NewKeyGenerationTest#
+#              - PerInstance/ImportKeyTest#
+#              - PerInstance/EncryptionOperationsTest#
+#              - PerInstance/AttestationTest#
+# Note that this violates GP requirements of HMAC size range.
+CFG_HMAC_64_1024_RANGE ?= n
+
+# Enable a hardware pbkdf2 function
+# By default use standard pbkdf2 implementation
+CFG_CRYPTO_HW_PBKDF2 ?= n
+$(eval $(call cfg-depends-all,CFG_CRYPTO_HW_PBKDF2,CFG_CRYPTO_PBKDF2))
+
+# CFG_HALT_CORES_ON_PANIC, when enabled, makes any call to panic() halt the
+# other cores. The feature currently relies on GIC device to trap the other
+# cores using an SGI interrupt specified by CFG_HALT_CORES_ON_PANIC_SGI.
+CFG_HALT_CORES_ON_PANIC ?= n
+CFG_HALT_CORES_ON_PANIC_SGI ?= 15
+$(eval $(call cfg-depends-all,CFG_HALT_CORES_ON_PANIC,CFG_GIC))

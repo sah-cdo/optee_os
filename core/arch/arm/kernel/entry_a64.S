@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015-2022, Linaro Limited
- * Copyright (c) 2021, Arm Limited
+ * Copyright (c) 2021-2023, Arm Limited
  */
 
 #include <platform_config.h>
@@ -12,6 +12,7 @@
 #include <generated/asm-defines.h>
 #include <keep.h>
 #include <kernel/thread_private.h>
+#include <mm/core_mmu.h>
 #include <sm/optee_smc.h>
 #include <sm/teesmc_opteed.h>
 #include <sm/teesmc_opteed_macros.h>
@@ -48,6 +49,11 @@
 	.macro read_feat_mte reg
 		mrs	\reg, id_aa64pfr1_el1
 		ubfx	\reg, \reg, #ID_AA64PFR1_EL1_MTE_SHIFT, #4
+	.endm
+
+	.macro read_feat_pan reg
+		mrs	\reg, id_mmfr3_el1
+		ubfx	\reg, \reg, #ID_MMFR3_EL1_PAN_SHIFT, #4
 	.endm
 
 	.macro set_sctlr_el1
@@ -142,27 +148,34 @@
 		isb
 	.endm
 
+	.macro init_pan
+		read_feat_pan x0
+		cmp	x0, #0
+		b.eq	1f
+		mrs	x0, sctlr_el1
+		bic	x0, x0, #SCTLR_SPAN
+		msr	sctlr_el1, x0
+		write_pan_enable
+	1:
+	.endm
+
 FUNC _start , :
-#if defined(CFG_CORE_SEL1_SPMC)
 	/*
-	 * With OP-TEE as SPMC at S-EL1 the SPMD (SPD_spmd) in TF-A passes
-	 * the DTB in x0, pagaeble part in x1 and the rest of the registers
-	 * are unused
+	 * Temporary copy of boot argument registers, will be passed to
+	 * boot_save_args() further down.
 	 */
-	mov	x19, x1		/* Save pagable part */
-	mov	x20, x0		/* Save DT address */
-#else
-	mov	x19, x0		/* Save pagable part address */
-#if defined(CFG_DT_ADDR)
-	ldr     x20, =CFG_DT_ADDR
-#else
-	mov	x20, x2		/* Save DT address */
-#endif
-#endif
+	mov	x19, x0
+	mov	x20, x1
+	mov	x21, x2
+	mov	x22, x3
 
 	adr	x0, reset_vect_table
 	msr	vbar_el1, x0
 	isb
+
+#ifdef CFG_PAN
+	init_pan
+#endif
 
 	set_sctlr_el1
 	isb
@@ -230,17 +243,35 @@ clear_bss:
 	cmp	x0, x1
 	b.lt	clear_bss
 
-#ifdef CFG_VIRTUALIZATION
+#ifdef CFG_NS_VIRTUALIZATION
 	/*
 	 * Clear .nex_bss, this code obviously depends on the linker keeping
 	 * start/end of .bss at least 8 byte aligned.
 	 */
-	adr	x0, __nex_bss_start
-	adr	x1, __nex_bss_end
+	adr_l	x0, __nex_bss_start
+	adr_l	x1, __nex_bss_end
 clear_nex_bss:
 	str	xzr, [x0], #8
 	cmp	x0, x1
 	b.lt	clear_nex_bss
+#endif
+
+
+#if defined(CFG_CORE_PHYS_RELOCATABLE)
+	/*
+	 * Save the base physical address, it will not change after this
+	 * point.
+	 */
+	adr_l	x2, core_mmu_tee_load_pa
+	adr	x1, _start		/* Load address */
+	str	x1, [x2]
+
+	mov_imm	x0, TEE_LOAD_ADDR	/* Compiled load address */
+	sub	x0, x1, x0		/* Relocatation offset */
+
+	cbz	x0, 1f
+	bl	relocate
+1:
 #endif
 
 	/* Setup SP_EL0 and SP_EL1, SP will be set to SP_EL0 */
@@ -265,6 +296,13 @@ clear_nex_bss:
 	/* Enable Console */
 	bl	console_init
 
+	mov	x0, x19
+	mov	x1, x20
+	mov	x2, x21
+	mov	x3, x22
+	mov	x4, xzr
+	bl	boot_save_args
+
 #ifdef CFG_MEMTAG
 	/*
 	 * If FEAT_MTE2 is available, initializes the memtag callbacks.
@@ -275,7 +313,6 @@ clear_nex_bss:
 #endif
 
 #ifdef CFG_CORE_ASLR
-	mov	x0, x20
 	bl	get_aslr_seed
 #else
 	mov	x0, #0
@@ -286,11 +323,12 @@ clear_nex_bss:
 
 #ifdef CFG_CORE_ASLR
 	/*
-	 * Process relocation information again updating for the new
-	 * offset. We're doing this now before MMU is enabled as some of
-	 * the memory will become write protected.
+	 * Process relocation information again updating for the virtual
+	 * map offset. We're doing this now before MMU is enabled as some
+	 * of the memory will become write protected.
 	 */
-	ldr	x0, boot_mmu_config + CORE_MMU_CONFIG_LOAD_OFFSET
+	ldr	x0, boot_mmu_config + CORE_MMU_CONFIG_MAP_OFFSET
+	cbz	x0, 1f
 	/*
 	 * Update cached_mem_end address with load offset since it was
 	 * calculated before relocation.
@@ -299,7 +337,9 @@ clear_nex_bss:
 	ldr	x6, [x5]
 	add	x6, x6, x0
 	str	x6, [x5]
+	adr	x1, _start		/* Load address */
 	bl	relocate
+1:
 #endif
 
 	bl	__get_core_pos
@@ -313,7 +353,7 @@ clear_nex_bss:
 	bl	console_init
 #endif
 
-#ifdef CFG_VIRTUALIZATION
+#ifdef CFG_NS_VIRTUALIZATION
 	/*
 	 * Initialize partition tables for each partition to
 	 * default_partition which has been relocated now to a different VA
@@ -321,33 +361,43 @@ clear_nex_bss:
 	bl	core_mmu_set_default_prtn_tbl
 #endif
 
-	mov	x0, x19		/* pagable part address */
-	mov	x1, #-1
 	bl	boot_init_primary_early
 
 #ifdef CFG_MEMTAG
 	init_memtag_per_cpu
 #endif
 
-#ifndef CFG_VIRTUALIZATION
-	mov	x21, sp
+#ifndef CFG_NS_VIRTUALIZATION
+	mov	x23, sp
 	adr_l	x0, threads
 	ldr	x0, [x0, #THREAD_CTX_STACK_VA_END]
 	mov	sp, x0
 	bl	thread_get_core_local
-	mov	x22, x0
-	str	wzr, [x22, #THREAD_CORE_LOCAL_FLAGS]
+	mov	x24, x0
+	str	wzr, [x24, #THREAD_CORE_LOCAL_FLAGS]
 #endif
-	mov	x0, x20		/* DT address */
 	bl	boot_init_primary_late
 #ifdef CFG_CORE_PAUTH
 	init_pauth_per_cpu
 #endif
 
-#ifndef CFG_VIRTUALIZATION
+#ifndef CFG_NS_VIRTUALIZATION
 	mov	x0, #THREAD_CLF_TMP
-	str     w0, [x22, #THREAD_CORE_LOCAL_FLAGS]
-	mov	sp, x21
+	str     w0, [x24, #THREAD_CORE_LOCAL_FLAGS]
+	mov	sp, x23
+#endif
+
+#ifdef _CFG_CORE_STACK_PROTECTOR
+	/* Update stack canary value */
+	sub	sp, sp, #0x10
+	mov	x0, sp
+	mov	x1, #1
+	mov	x2, #0x8
+	bl	plat_get_random_stack_canaries
+	ldr	x0, [sp]
+	adr_l	x5, __stack_chk_guard
+	str	x0, [x5]
+	add	sp, sp, #0x10
 #endif
 
 	/*
@@ -366,27 +416,27 @@ clear_nex_bss:
 	 * next entry. Matches the thread_init_boot_thread in
 	 * boot.c.
 	 */
-#ifndef CFG_VIRTUALIZATION
+#ifndef CFG_NS_VIRTUALIZATION
 	bl 	thread_clr_boot_thread
 #endif
 
 #ifdef CFG_CORE_FFA
 	adr	x0, cpu_on_handler
 	/*
-	 * Compensate for the load offset since cpu_on_handler() is
+	 * Compensate for the virtual map offset since cpu_on_handler() is
 	 * called with MMU off.
 	 */
-	ldr	x1, boot_mmu_config + CORE_MMU_CONFIG_LOAD_OFFSET
+	ldr	x1, boot_mmu_config + CORE_MMU_CONFIG_MAP_OFFSET
 	sub	x0, x0, x1
 	bl	thread_spmc_register_secondary_ep
 	b	thread_ffa_msg_wait
 #else
 	/*
-	 * Pass the vector address returned from main_init
-	 * Compensate for the load offset since cpu_on_handler() is
-	 * called with MMU off.
+	 * Pass the vector address returned from main_init Compensate for
+	 * the virtual map offset since cpu_on_handler() is called with MMU
+	 * off.
 	 */
-	ldr	x0, boot_mmu_config + CORE_MMU_CONFIG_LOAD_OFFSET
+	ldr	x0, boot_mmu_config + CORE_MMU_CONFIG_MAP_OFFSET
 	adr	x1, thread_vector_table
 	sub	x1, x1, x0
 	mov	x0, #TEESMC_OPTEED_RETURN_ENTRY_DONE
@@ -403,9 +453,12 @@ LOCAL_DATA cached_mem_end , :
 	.skip	8
 END_DATA cached_mem_end
 
-#ifdef CFG_CORE_ASLR
+#if defined(CFG_CORE_ASLR) || defined(CFG_CORE_PHYS_RELOCATABLE)
 LOCAL_FUNC relocate , :
-	/* x0 holds load offset */
+	/*
+	 * x0 holds relocate offset
+	 * x1 holds load address
+	 */
 #ifdef CFG_WITH_PAGER
 	adr_l	x6, __init_end
 #else
@@ -413,7 +466,6 @@ LOCAL_FUNC relocate , :
 #endif
 	ldp	w2, w3, [x6, #BOOT_EMBDATA_RELOC_OFFSET]
 
-	mov_imm	x1, TEE_RAM_START
 	add	x2, x2, x6	/* start of relocations */
 	add	x3, x3, x2	/* end of relocations */
 
@@ -423,8 +475,8 @@ LOCAL_FUNC relocate , :
 	 * scripts/gen_tee_bin.py
 	 *
 	 * All the R_AARCH64_RELATIVE relocations are translated into a
-	 * list list of 32-bit offsets from TEE_RAM_START. At each address
-	 * a 64-bit value pointed out which increased with the load offset.
+	 * list of 32-bit offsets from TEE_LOAD_ADDR. At each address a
+	 * 64-bit value pointed out which increased with the load offset.
 	 */
 
 #ifdef CFG_WITH_PAGER
@@ -545,6 +597,10 @@ FUNC cpu_on_handler , :
 
 	set_sctlr_el1
 	isb
+
+#ifdef CFG_PAN
+	init_pan
+#endif
 
 	/* Enable aborts now that we can receive exceptions */
 	msr	daifclr, #DAIFBIT_ABT

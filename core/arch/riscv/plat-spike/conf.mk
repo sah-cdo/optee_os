@@ -7,13 +7,12 @@ $(call force,CFG_SECURE_PARTITION,n)
 $(call force,CFG_PAGED_USER_TA,n)
 $(call force,CFG_WITH_PAGER,n)
 $(call force,CFG_TEE_TA_LOG_LEVEL,0)
-$(call force,CFG_TEE_CORE_LOG_LEVEL,0)
 $(call force,CFG_EMBEDDED_TS,n)
 $(call force,CFG_CORE_ASLR,n)
 $(call force,CFG_LIBUTILS_WITH_ISOC,y)
 $(call force,CFG_UNWIND,n)
 $(call force,CFG_DT,n)
-$(call force,CFG_VIRTUALIZATION,n)
+$(call force,CFG_NS_VIRTUALIZATION,n)
 $(call force,CFG_WITH_VFP,n)
 $(call force,CFG_WITH_STATS,n)
 $(call force,CFG_WITH_STMM_SP,n)
@@ -68,8 +67,11 @@ $(call force,CFG_SECSTOR_TA,n)
 $(call force,CFG_SHOW_CONF_ON_BOOT,n)
 $(call force,CFG_SYSCALL_WRAPPERS_MCOUNT,n)
 $(call force,CFG_BOOT_SYNC_CPU,y)
-$(call force,CFG_WARN_INSECURE,y)
+$(call force,CFG_INSECURE,y)
+$(call force,CFG_RISCV_TIME_SOURCE_RDTIME,y)
+CFG_RISCV_MTIME_RATE ?= 10000000
 CFG_TDDRAM_START ?= 0xbdb00000
 CFG_TDDRAM_SIZE  ?= 0x00f00000
 CFG_SHMEM_START  ?= 0x7fe00000
 CFG_SHMEM_SIZE   ?= 0x00200000
+CFG_TEE_RAM_VA_SIZE ?= 0x00400000

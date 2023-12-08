@@ -14,6 +14,7 @@
 #include <io.h>
 #include <keep.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
 #include <kernel/boot.h>
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
@@ -1162,7 +1163,6 @@ void stm32mp_register_clock_parents_secure(unsigned long clock_id)
 	secure_parent_clocks(parent_id);
 }
 
-#ifdef CFG_EMBED_DTB
 static const char *stm32mp_osc_node_label[NB_OSC] = {
 	[OSC_LSI] = "clk-lsi",
 	[OSC_LSE] = "clk-lse",
@@ -1179,7 +1179,7 @@ static unsigned int clk_freq_prop(const void *fdt, int node)
 	int ret = 0;
 
 	/* Disabled clocks report null rate */
-	if (_fdt_get_status(fdt, node) == DT_STATUS_DISABLED)
+	if (fdt_get_status(fdt, node) == DT_STATUS_DISABLED)
 		return 0;
 
 	cuint = fdt_getprop(fdt, node, "clock-frequency", &ret);
@@ -1222,7 +1222,6 @@ static void get_osc_freq_from_dt(const void *fdt)
 			DMSG("Osc %s: no frequency info", name);
 	}
 }
-#endif /*CFG_EMBED_DTB*/
 
 static void enable_static_secure_clocks(void)
 {
@@ -1253,7 +1252,6 @@ static void __maybe_unused disable_rcc_tzen(void)
 	io_clrbits32(stm32_rcc_base() + RCC_TZCR, RCC_TZCR_TZEN);
 }
 
-#ifdef CFG_EMBED_DTB
 static TEE_Result stm32mp1_clk_fdt_init(const void *fdt, int node)
 {
 	unsigned int i = 0;
@@ -1301,7 +1299,6 @@ static TEE_Result stm32mp1_clk_fdt_init(const void *fdt, int node)
 
 	return TEE_SUCCESS;
 }
-#endif /*CFG_EMBED_DTB*/
 
 /*
  * Conversion between clk references and clock gates and clock on internals
@@ -1383,7 +1380,7 @@ struct clk *stm32mp_rcc_clock_id_to_clk(unsigned long clock_id)
 	return clock_id_to_clk(clock_id);
 }
 
-#if CFG_TEE_CORE_LOG_LEVEL >= TRACE_DEBUG
+#if (CFG_TEE_CORE_LOG_LEVEL >= TRACE_DEBUG) && defined(CFG_TEE_CORE_DEBUG)
 struct clk_name {
 	unsigned int clock_id;
 	const char *name;
@@ -1502,24 +1499,23 @@ static TEE_Result register_stm32mp1_clocks(void)
 	return TEE_SUCCESS;
 }
 
-#ifdef CFG_DRIVERS_CLK_DT
-static struct clk *stm32mp1_clk_dt_get_clk(struct dt_driver_phandle_args *pargs,
-					   void *data __unused, TEE_Result *res)
+static TEE_Result stm32mp1_clk_dt_get_clk(struct dt_pargs *pargs,
+					  void *data __unused,
+					  struct clk **out_clk)
 {
 	unsigned long clock_id = pargs->args[0];
 	struct clk *clk = NULL;
 
-	*res = TEE_ERROR_BAD_PARAMETERS;
-
 	if (pargs->args_count != 1)
-		return NULL;
+		return TEE_ERROR_BAD_PARAMETERS;
 
 	clk = clock_id_to_clk(clock_id);
 	if (!clk)
-		return NULL;
+		return TEE_ERROR_BAD_PARAMETERS;
 
-	*res = TEE_SUCCESS;
-	return clk;
+	*out_clk = clk;
+
+	return TEE_SUCCESS;
 }
 
 /* Non-null reference for compat data */
@@ -1571,21 +1567,3 @@ DEFINE_DT_DRIVER(stm32mp1_clock_dt_driver) = {
 	.match_table = stm32mp1_clock_match_table,
 	.probe = stm32mp1_clock_provider_probe,
 };
-#else /*CFG_DRIVERS_CLK_DT*/
-static TEE_Result stm32mp1_clk_early_init(void)
-{
-	TEE_Result __maybe_unused res = TEE_ERROR_GENERIC;
-
-	res = register_stm32mp1_clocks();
-	if (res) {
-		EMSG("Failed to register clocks: %#"PRIx32, res);
-		panic();
-	}
-
-	enable_static_secure_clocks();
-
-	return TEE_SUCCESS;
-}
-
-service_init(stm32mp1_clk_early_init);
-#endif /*CFG_DRIVERS_CLK_DT*/

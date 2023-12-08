@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2015-2021, Linaro Limited
  */
-#ifndef OPTEE_SMC_H
-#define OPTEE_SMC_H
+#ifndef __SM_OPTEE_SMC_H
+#define __SM_OPTEE_SMC_H
 
 #include <stdint.h>
 
@@ -530,7 +530,7 @@
  * a0	OPTEE_SMC_RETURN_OK
  * a1	value
  * a2	Bit[0]: OPTEE_SMC_ASYNC_NOTIF_VALUE_VALID if the value in a1 is
- *		valid, else 0 if no values where pending
+ *		valid, else 0 if no values were pending
  * a2	Bit[1]: OPTEE_SMC_ASYNC_NOTIF_VALUE_PENDING if another value is
  *		pending, else 0.
  *	Bit[31:2]: MBZ
@@ -705,4 +705,4 @@
 	((((ret) & OPTEE_SMC_RETURN_RPC_PREFIX_MASK) == \
 		OPTEE_SMC_RETURN_RPC_PREFIX)))
 
-#endif /* OPTEE_SMC_H */
+#endif /* __SM_OPTEE_SMC_H */

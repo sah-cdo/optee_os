@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /*
  * Copyright (c) 2015, Linaro Limited
+ * Copyright (c) 2023, Arm Limited
  */
-#ifndef ARM64_H
-#define ARM64_H
+#ifndef __ARM64_H
+#define __ARM64_H
 
 #include <compiler.h>
 #include <sys/cdefs.h>
@@ -80,6 +81,8 @@
 
 #define SPSR_64_DAIF_SHIFT	U(6)
 #define SPSR_64_DAIF_MASK	U(0xf)
+
+#define SPSR_64_PAN		BIT64(22)
 
 #define SPSR_32_AIF_SHIFT	U(6)
 #define SPSR_32_AIF_MASK	U(0x7)
@@ -223,7 +226,7 @@
 #define PAR_PA_SHIFT		U(12)
 #define PAR_PA_MASK		(BIT64(36) - 1)
 
-#define TLBI_MVA_SHIFT		U(12)
+#define TLBI_VA_SHIFT		U(12)
 #define TLBI_ASID_SHIFT		U(48)
 #define TLBI_ASID_MASK		U(0xff)
 
@@ -236,6 +239,18 @@
 #define FEAT_MTE_IMPLEMENTED		U(0x1)
 #define FEAT_MTE2_IMPLEMENTED		U(0x2)
 #define FEAT_MTE3_IMPLEMENTED		U(0x3)
+
+#define ID_AA64MMFR1_EL1_PAN_MASK	UL(0xf)
+#define ID_AA64MMFR1_EL1_PAN_SHIFT	U(20)
+#define FEAT_PAN_NOT_IMPLEMENTED	U(0x0)
+#define FEAT_PAN_IMPLEMENTED		U(0x1)
+#define FEAT_PAN2_IMPLEMENTED		U(0x2)
+#define FEAT_PAN3_IMPLEMENTED		U(0x3)
+
+#define ID_AA64ISAR0_EL1_CRC32_MASK	UL(0xf)
+#define ID_AA64ISAR0_EL1_CRC32_SHIFT	U(16)
+#define FEAT_CRC32_NOT_IMPLEMENTED	U(0x0)
+#define FEAT_CRC32_IMPLEMENTED		U(0x1)
 
 #define ID_AA64ISAR1_GPI_SHIFT		U(28)
 #define ID_AA64ISAR1_GPI_MASK		U(0xf)
@@ -265,6 +280,8 @@
 #define ID_AA64ISAR1_APA_ARCH_EPAC2_FPAC	U(0x4)
 #define ID_AA64ISAR1_APA_ARCH_EPAC2_FPAC_CMB	U(0x5)
 
+#define ID_MMFR3_EL1_PAN_SHIFT			U(16)
+
 #define GCR_EL1_RRND				BIT64(16)
 
 #ifndef __ASSEMBLER__
@@ -286,6 +303,11 @@ static inline __noprof void dsb_ish(void)
 static inline __noprof void dsb_ishst(void)
 {
 	asm volatile ("dsb ishst" : : : "memory");
+}
+
+static inline __noprof void dsb_osh(void)
+{
+	asm volatile ("dsb osh" : : : "memory");
 }
 
 static inline __noprof void sev(void)
@@ -332,14 +354,21 @@ static inline __noprof uint64_t read_pmu_ccnt(void)
 	return val;
 }
 
-static inline __noprof void tlbi_vaae1is(uint64_t mva)
+static inline __noprof void tlbi_vaae1is(uint64_t va)
 {
-	asm volatile ("tlbi	vaae1is, %0" : : "r" (mva));
+	asm volatile ("tlbi	vaae1is, %0" : : "r" (va));
 }
 
-static inline __noprof void tlbi_vale1is(uint64_t mva)
+static inline __noprof void tlbi_vale1is(uint64_t va)
 {
-	asm volatile ("tlbi	vale1is, %0" : : "r" (mva));
+	asm volatile ("tlbi	vale1is, %0" : : "r" (va));
+}
+
+static inline void write_64bit_pair(uint64_t dst, uint64_t hi, uint64_t lo)
+{
+	/* 128bits should be written to hardware at one time */
+	asm volatile ("stp %1, %0, [%2]" : :
+		      "r" (hi), "r" (lo), "r" (dst) : "memory");
 }
 
 /*
@@ -426,7 +455,9 @@ DEFINE_U64_REG_READ_FUNC(par_el1)
 
 DEFINE_U64_REG_WRITE_FUNC(mair_el1)
 
+DEFINE_U64_REG_READ_FUNC(id_aa64mmfr1_el1)
 DEFINE_U64_REG_READ_FUNC(id_aa64pfr1_el1)
+DEFINE_U64_REG_READ_FUNC(id_aa64isar0_el1)
 DEFINE_U64_REG_READ_FUNC(id_aa64isar1_el1)
 DEFINE_REG_READ_FUNC_(apiakeylo, uint64_t, S3_0_c2_c1_0)
 DEFINE_REG_READ_FUNC_(apiakeyhi, uint64_t, S3_0_c2_c1_1)
@@ -453,7 +484,25 @@ DEFINE_REG_WRITE_FUNC_(icc_eoir0, uint32_t, S3_0_c12_c8_1)
 DEFINE_REG_WRITE_FUNC_(icc_eoir1, uint32_t, S3_0_c12_c12_1)
 DEFINE_REG_WRITE_FUNC_(icc_igrpen0, uint32_t, S3_0_C12_C12_6)
 DEFINE_REG_WRITE_FUNC_(icc_igrpen1, uint32_t, S3_0_C12_C12_7)
+DEFINE_REG_WRITE_FUNC_(icc_sgi1r, uint64_t, S3_0_C12_C11_5)
+DEFINE_REG_WRITE_FUNC_(icc_asgi1r, uint64_t, S3_0_C12_C11_6)
+
+DEFINE_REG_WRITE_FUNC_(pan, uint64_t, S3_0_c4_c2_3)
+DEFINE_REG_READ_FUNC_(pan, uint64_t, S3_0_c4_c2_3)
+
+static inline void write_pan_enable(void)
+{
+	/* msr pan, #1 */
+	asm volatile("msr	S0_0_c4_c1_4, xzr" ::: "memory" );
+}
+
+static inline void write_pan_disable(void)
+{
+	/* msr pan, #0 */
+	asm volatile("msr	S0_0_c4_c0_4, xzr" ::: "memory" );
+}
+
 #endif /*__ASSEMBLER__*/
 
-#endif /*ARM64_H*/
+#endif /*__ARM64_H*/
 

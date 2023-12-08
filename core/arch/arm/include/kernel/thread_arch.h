@@ -58,11 +58,18 @@ struct thread_core_local {
 #ifdef CFG_TEE_CORE_DEBUG
 	unsigned int locked_count; /* Number of spinlocks held */
 #endif
+#if defined(ARM64) && defined(CFG_CORE_FFA)
+	/* Function ID to use for a direct response, 32-bit vs 64-bit */
+	uint32_t direct_resp_fid;
+#endif
 #if defined(ARM64) && defined(CFG_CORE_WORKAROUND_SPECTRE_BP_SEC)
 	uint8_t bhb_loop_count;
 #endif
 #ifdef CFG_CORE_DEBUG_CHECK_STACKS
 	bool stackcheck_recursion;
+#endif
+#ifdef CFG_FAULT_MITIGATION
+	struct ftmn_func_arg *ftmn_arg;
 #endif
 } THREAD_CORE_LOCAL_ALIGNED;
 
@@ -177,7 +184,7 @@ struct thread_abort_regs {
 #endif /*ARM64*/
 
 #ifdef ARM32
-struct thread_svc_regs {
+struct thread_scall_regs {
 	uint32_t spsr;
 	uint32_t r0;
 	uint32_t r1;
@@ -191,7 +198,7 @@ struct thread_svc_regs {
 };
 #endif /*ARM32*/
 #ifdef ARM64
-struct thread_svc_regs {
+struct thread_scall_regs {
 	uint64_t elr;
 	uint64_t spsr;
 	uint64_t x0;	/* r0_usr */
@@ -294,7 +301,7 @@ unsigned long thread_system_reset_handler(unsigned long a0, unsigned long a1);
  * thread_*_exceptions() functions below.
  * These definitions are compatible with both ARM32 and ARM64.
  */
-#if defined(CFG_ARM_GICV3)
+#if defined(CFG_CORE_IRQ_IS_NATIVE_INTR)
 #define THREAD_EXCP_FOREIGN_INTR	(ARM32_CPSR_F >> ARM32_CPSR_F_SHIFT)
 #define THREAD_EXCP_NATIVE_INTR		(ARM32_CPSR_I >> ARM32_CPSR_F_SHIFT)
 #else
@@ -449,6 +456,8 @@ bool thread_disable_prealloc_rpc_cache(uint64_t *cookie);
  */
 bool thread_enable_prealloc_rpc_cache(void);
 
+unsigned long thread_hvc(unsigned long func_id, unsigned long a1,
+			 unsigned long a2, unsigned long a3);
 unsigned long thread_smc(unsigned long func_id, unsigned long a1,
 			 unsigned long a2, unsigned long a3);
 void thread_smccc(struct thread_smc_args *arg_res);
